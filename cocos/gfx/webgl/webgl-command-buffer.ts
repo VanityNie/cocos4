@@ -35,7 +35,7 @@ import { WebGLInputAssembler } from './webgl-input-assembler';
 import { WebGLPipelineState } from './webgl-pipeline-state';
 import { RenderPass } from '../base/render-pass';
 import { StencilFace, BufferSource,
-    CommandBufferInfo, BufferTextureCopy, Color, Rect, Viewport, DrawInfo, DynamicStates, TextureBlit, Filter } from '../base/define';
+    CommandBufferInfo, BufferTextureCopy, Color, Rect, Viewport, DrawInfo, DispatchInfo, DynamicStates, TextureBlit, Filter } from '../base/define';
 import { GeneralBarrier } from '../base/states/general-barrier';
 import { TextureBarrier } from '../base/states/texture-barrier';
 import { BufferBarrier } from '../base/states/buffer-barrier';
@@ -244,6 +244,10 @@ export class WebGLCommandBuffer extends CommandBuffer {
     }
 
     public override draw (infoOrAssembler: Readonly<DrawInfo> | Readonly<InputAssembler>): void {
+        errorID(16328);
+    }
+
+    public override dispatch (info: Readonly<DispatchInfo>): void {
         errorID(16328);
     }
 

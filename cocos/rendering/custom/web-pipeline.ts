@@ -45,7 +45,7 @@ import { GeometryRenderer } from '../geometry-renderer';
 import { Material } from '../../asset/assets';
 import { decideProfilerCamera } from '../pipeline-funcs';
 import { DebugViewCompositeType } from '../debug-view';
-import { buildReflectionProbePass, genHashValue, resetPassMGState } from './define';
+import { buildReflectionProbePass, genHashValue, resetPassMGState, rpMergeInfos } from './define';
 import { createGfxDescriptorSetsAndPipelines } from './layout-graph-utils';
 import { Root } from '../../root';
 import { Scene } from '../../scene-graph';
@@ -864,7 +864,11 @@ export class WebComputePassBuilder extends WebSetter implements ComputePassBuild
         this._renderGraph.setName(this._vertID, name);
     }
     addTexture (name: string, slotName: string, sampler: Sampler | null = null): void {
-        throw new Error('Method not implemented.');
+        this._addComputeResource(name, AccessType.READ, slotName);
+        if (sampler) {
+            const descriptorID = this._lg.attributeIndex.get(slotName)!;
+            this._data.samplers.set(descriptorID, sampler);
+        }
     }
     addStorageBuffer (name: string, accessType: AccessType, slotName: string): void {
         this._addComputeResource(name, accessType, slotName);
@@ -1668,6 +1672,20 @@ export class WebPipeline extends WebSetter implements BasicPipeline {
                 if (vert.t === RenderGraphValue.RasterPass) {
                     genHashValue(vert.j as RasterPass);
                 }
+            });
+        }
+
+        //if enable compute pass in RDG， Graphic pass can not be merged.
+        let hasComputePass = false;
+        this._renderGraph.x.forEach((vert) => {
+            if (vert.t === RenderGraphValue.Compute) {
+                hasComputePass = true;
+            }
+        });
+        if (hasComputePass) {
+            rpMergeInfos.forEach((mergeInfo) => {
+                mergeInfo.needBeginRP = true;
+                mergeInfo.needEndRP = true;
             });
         }
     }

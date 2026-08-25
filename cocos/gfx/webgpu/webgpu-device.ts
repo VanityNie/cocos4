@@ -555,8 +555,8 @@ export class WebGPUDevice extends Device {
         const features = this._adapter!.features;
         // FIXME: require by query
         this._multiDrawIndirect = false;
-
         this._features.fill(false);
+        this._features[Feature.COMPUTE_SHADER] = true;
         this._features[Feature.ELEMENT_INDEX_UINT] = true;
         this._features[Feature.INSTANCED_ARRAYS] = true;
         this._features[Feature.MULTIPLE_RENDER_TARGETS] = true;

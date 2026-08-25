@@ -36,7 +36,7 @@ import {
     StencilFace,
     CommandBufferType,
     CommandBufferInfo,
-    BufferTextureCopy, Color, Rect, Viewport, DrawInfo, Filter, TextureBlit,
+    BufferTextureCopy, Color, Rect, Viewport, DrawInfo, DispatchInfo, Filter, TextureBlit,
 } from './define';
 import { GeneralBarrier } from './states/general-barrier';
 import { TextureBarrier } from './states/texture-barrier';
@@ -233,6 +233,13 @@ export abstract class CommandBuffer extends GFXObject {
      * @param infoOrAssembler The draw call information.
      */
     public abstract draw (infoOrAssembler: Readonly<DrawInfo> | Readonly<InputAssembler>): void;
+
+    /**
+     * @en Dispatch compute workgroups.
+     * @zh 分发 Compute 工作组。
+     * @param info The compute dispatch information.
+     */
+    public abstract dispatch (info: Readonly<DispatchInfo>): void;
 
     /**
      * @en Update buffer.

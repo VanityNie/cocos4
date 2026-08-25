@@ -1930,12 +1930,13 @@ class PreRenderVisitor extends BaseRenderVisitor implements RenderGraphVisitor {
             const layoutStage = devicePass.renderLayout;
             const layoutDesc = layoutStage!.descriptorSet!;
             cmdBuff.bindDescriptorSet(SetIndex.GLOBAL, layoutDesc);
+            cmdBuff.bindDescriptorSet(SetIndex.MATERIAL, pass!.descriptorSet);
+            cmdBuff.dispatch(new DispatchInfo(
+                value.threadGroupCountX,
+                value.threadGroupCountY,
+                value.threadGroupCountZ,
+            ));
         }
-
-        const gx = value.threadGroupCountX;
-        const gy = value.threadGroupCountY;
-        const gz = value.threadGroupCountZ;
-        (cmdBuff as any).dispatch(new DispatchInfo(gx, gy, gz));
     }
 }
 

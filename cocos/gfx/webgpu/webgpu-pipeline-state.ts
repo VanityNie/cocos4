@@ -26,7 +26,7 @@ import { PipelineState, PipelineStateInfo } from '../base/pipeline-state';
 import { IWebGPUGPUInputAssembler, IWebGPUGPUPipelineState } from './webgpu-gpu-objects';
 import { WebGPURenderPass } from './webgpu-render-pass';
 import { WebGPUShader } from './webgpu-shader';
-import { BlendOp, CullMode, DynamicStateFlagBit, Format, FormatInfos, PrimitiveMode, ShaderStageFlagBit } from '../base/define';
+import { BlendOp, CullMode, DynamicStateFlagBit, Format, FormatInfos, PipelineBindPoint, PrimitiveMode, ShaderStageFlagBit } from '../base/define';
 import { WebGPUPipelineLayout } from './webgpu-pipeline-layout';
 import {
     GFXFormatToWGPUFormat,
@@ -73,6 +73,32 @@ export class WebGPUPipelineState extends PipelineState {
         this._is = info.inputState;
         this._renderPass = info.renderPass;
         this._dynamicStates = info.dynamicStates;
+
+        if (info.bindPoint === PipelineBindPoint.COMPUTE) {
+            const gpuShader = (info.shader as WebGPUShader).gpuShader;
+            const computeStage = gpuShader.gpuStages.find(
+                (s) => s.type === ShaderStageFlagBit.COMPUTE,
+            )!;
+
+            const layoutObj = info.pipelineLayout as WebGPUPipelineLayout;
+            const desc: GPUComputePipelineDescriptor = {
+                layout: layoutObj.gpuPipelineLayout!.nativePipelineLayout,
+                compute: computeStage.gpuShader!,
+            };
+
+            this._gpuPipelineState = {
+                gpuPrimitive: 'triangle-list',
+                gpuShader: gpuShader,
+                gpuPipelineLayout: layoutObj.gpuPipelineLayout,
+                rs: info.rasterizerState, dss: info.depthStencilState,
+                stencilRef: 0, bs: info.blendState,
+                gpuRenderPass: null!,
+                dynamicStates: [],
+                pipelineState: desc,
+                nativePipeline: WebGPUDeviceManager.instance.nativeDevice!.createComputePipeline(desc),
+            };
+            return;
+        }
 
         const dynamicStates: DynamicStateFlagBit[] = [];
         for (let i = 0; i < 31; i++) {
@@ -217,7 +243,7 @@ export class WebGPUPipelineState extends PipelineState {
         }
         const gpuShader = this.shader;
         const shaderAttrs = gpuShader.attributes;
-        const pipelineState = this._gpuPipelineState!.pipelineState!;
+        const pipelineState = this._gpuPipelineState!.pipelineState as GPURenderPipelineDescriptor;
         const vertexAttrs: GPUVertexBufferLayout[] = [];
         const emptyPushAttr: string[] = [];
         const streamCount = ia.gpuVertexBuffers.length;

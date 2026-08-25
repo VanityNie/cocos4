@@ -34,7 +34,7 @@ import { GeneralBarrier } from '../base/states/general-barrier';
 import { TextureBarrier } from '../base/states/texture-barrier';
 import { BufferBarrier } from '../base/states/buffer-barrier';
 import { StencilFace, BufferSource, CommandBufferInfo, BufferTextureCopy, Color,
-    Rect, Viewport, DrawInfo, TextureBlit, Filter,
+    Rect, Viewport, DrawInfo, DispatchInfo, TextureBlit, Filter,
 } from '../base/define';
 
 export class EmptyCommandBuffer extends CommandBuffer {
@@ -66,6 +66,7 @@ export class EmptyCommandBuffer extends CommandBuffer {
     public setStencilWriteMask (face: StencilFace, writeMask: number): void {}
     public setStencilCompareMask (face: StencilFace, reference: number, compareMask: number): void {}
     public draw (infoOrAssembler: Readonly<DrawInfo> | Readonly<InputAssembler>): void {}
+    public dispatch (info: Readonly<DispatchInfo>): void {}
     public updateBuffer (buffer: Buffer, data: Readonly<BufferSource>, size?: number): void {}
     public copyBuffersToTexture (buffers: Readonly<ArrayBufferView[]>, texture: Texture, regions: Readonly<BufferTextureCopy[]>): void {}
     public execute (cmdBuffs: Readonly<CommandBuffer[]>, count: number): void {}

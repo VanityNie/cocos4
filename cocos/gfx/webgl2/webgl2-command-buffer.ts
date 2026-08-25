@@ -28,7 +28,7 @@ import { CommandBuffer } from '../base/command-buffer';
 import {
     StencilFace,
     BufferSource, CommandBufferInfo,
-    BufferTextureCopy, Color, Rect, Viewport, DrawInfo, DynamicStates, TextureBlit, Filter,
+    BufferTextureCopy, Color, Rect, Viewport, DrawInfo, DispatchInfo, DynamicStates, TextureBlit, Filter,
 } from '../base/define';
 import { Framebuffer } from '../base/framebuffer';
 import { InputAssembler } from '../base/input-assembler';
@@ -249,6 +249,10 @@ export class WebGL2CommandBuffer extends CommandBuffer {
     }
 
     public draw (infoOrAssembler: Readonly<DrawInfo> | Readonly<InputAssembler>): void {
+        errorID(16328);
+    }
+
+    public dispatch (info: Readonly<DispatchInfo>): void {
         errorID(16328);
     }
 
