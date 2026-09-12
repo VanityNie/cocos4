@@ -259,12 +259,13 @@ const enum PipelineState {
     FRAME,
     BUILDING,
     EXECUTING,
-    EXECUTED,
     DESTROYED,
 }
 
 /**
- * WebGPU pipeline extension framework, deliberately not installed in the runtime factory.
+ * WebGPU pipeline extension framework. Factory hookup pending: createCustomPipeline()
+ * currently hardcodes WebPipeline; once wired, the backend selector will create a
+ * WebGPUPipeline subclass for WebGPU devices and WebPipeline for WebGL devices.
  *
  * Owns logical graphs and frame transitions, not native GPU resources. A concrete implementation
  * supplies its render-graph build (buildRenderGraph) and backend resource factories; execution is
@@ -420,28 +421,24 @@ export abstract class WebGPUPipeline extends WebSetter implements Pipeline {
 
     public execute (): void {
         this.requireState(PipelineState.EXECUTING, 'execute');
-        try {
-            // Unified execution: reuse the existing WebPipeline Executor.
-            if (!this._executor) {
-                this._executor = new Executor(
-                    this,
-                    this.device,
-                    this.resourceGraph,
-                    this.layoutGraph,
-                    this._width,
-                    this._height,
-                );
-            }
-            this._executor.resize(this._width, this._height);
-            this._executor.execute(this.renderGraph);
-        } finally {
-            this._state = PipelineState.EXECUTED;
+        // Unified execution: reuse the existing WebPipeline Executor.
+        if (!this._executor) {
+            this._executor = new Executor(
+                this,
+                this.device,
+                this.resourceGraph,
+                this.layoutGraph,
+                this._width,
+                this._height,
+            );
         }
+        this._executor.resize(this._width, this._height);
+        this._executor.execute(this.renderGraph);
     }
 
     public endFrame (): void {
         if (this._state !== PipelineState.FRAME && this._state !== PipelineState.BUILDING
-            && this._state !== PipelineState.EXECUTING && this._state !== PipelineState.EXECUTED) {
+            && this._state !== PipelineState.EXECUTING) {
             throw new Error('WebGPUPipeline has no completed or abortable frame.');
         }
         this.renderGraph.clear();
@@ -468,7 +465,7 @@ export abstract class WebGPUPipeline extends WebSetter implements Pipeline {
     protected requireResourceMutation (): void {
         if (this._state !== PipelineState.CREATED && this._state !== PipelineState.READY
             && this._state !== PipelineState.FRAME && this._state !== PipelineState.BUILDING) {
-            throw new Error('WebGPUPipeline resource descriptions are immutable after compilation.');
+            throw new Error('WebGPUPipeline resource descriptions are immutable after setup.');
         }
     }
 
@@ -1682,9 +1679,10 @@ export class WebGPURenderPassBuilder extends WebGPUSetter implements RenderPassB
         subpassData.resolvePairs.push(resolve);
     }
 
-    private _addComputeResource (name: string, accessType: AccessType, slotName: string): void {
+    private _addComputeResource (name: string, accessType: AccessType, slotName: string, plane = 0): void {
         const view = this._pipeline.framePool.graphObjects.createComputeView(slotName);
         view.accessType = accessType;
+        view.plane = plane;
         const views = this._pass.computeViews.get(name);
         if (views) {
             views.push(view);
@@ -1694,7 +1692,7 @@ export class WebGPURenderPassBuilder extends WebGPUSetter implements RenderPassB
     }
 
     public addTexture (name: string, slotName: string, sampler: Sampler | null = null, plane?: number): void {
-        this._addComputeResource(name, AccessType.READ, slotName);
+        this._addComputeResource(name, AccessType.READ, slotName, plane);
         if (sampler) {
             const descriptorID = this._lg.attributeIndex.get(slotName)!;
             this._data.samplers.set(descriptorID, sampler);
@@ -1870,7 +1868,7 @@ export class WebGPUComputePassBuilder extends WebGPUSetter implements ComputePas
     }
 
     public addTexture (name: string, slotName: string, sampler: Sampler | null = null, plane?: number): void {
-        this._addComputeResource(name, AccessType.READ, slotName);
+        this._addComputeResource(name, AccessType.READ, slotName, plane);
         if (sampler) {
             const descriptorID = this._lg.attributeIndex.get(slotName)!;
             this._data.samplers.set(descriptorID, sampler);
@@ -1902,9 +1900,10 @@ export class WebGPUComputePassBuilder extends WebGPUSetter implements ComputePas
         return this._pipeline.framePool.computeQueueBuilders.acquire(queueID);
     }
 
-    private _addComputeResource (name: string, accessType: AccessType, slotName: string): void {
+    private _addComputeResource (name: string, accessType: AccessType, slotName: string, plane = 0): void {
         const view = this._pipeline.framePool.graphObjects.createComputeView(slotName);
         view.accessType = accessType;
+        view.plane = plane;
         const views = this._pass.computeViews.get(name);
         if (views) {
             views.push(view);
