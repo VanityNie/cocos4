@@ -76,6 +76,7 @@ import { WebGPUDeviceManager } from './define';
 import { WebGPUSwapchain } from './webgpu-swapchain';
 import { WebGPUPipelineLayout } from './webgpu-pipeline-layout';
 import { error, errorID } from '../../core';
+import { flushWebGPUMorphComputes } from './webgpu-morph-compute';
 
 export interface IWebGPUDepthBias {
     constantFactor: number;
@@ -320,6 +321,7 @@ export class WebGPUCommandBuffer extends CommandBuffer {
     public endRenderPass (): void {
         const device = WebGPUDeviceManager.instance;
         const nativeDevice = (device).nativeDevice!;
+        this._numDispatches += flushWebGPUMorphComputes(nativeDevice);
         const cmdEncoder = nativeDevice.createCommandEncoder();
         const passEncoder = cmdEncoder.beginRenderPass(this._nativePassDesc!);
         this._renderPassFuncQueue.forEach((cb) => {

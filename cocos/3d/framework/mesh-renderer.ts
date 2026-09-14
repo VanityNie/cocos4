@@ -33,7 +33,7 @@ import { MorphModel } from '../models/morph-model';
 import { Root } from '../../root';
 import { MobilityMode, TransformBit } from '../../scene-graph/node-enum';
 import { ModelRenderer } from '../../misc/model-renderer';
-import { MorphRenderingInstance } from '../assets/morph-rendering';
+import { MorphRenderingInstance, MorphRenderingMode } from '../assets/morph-rendering';
 import { NodeEventType } from '../../scene-graph/node-event';
 import { Texture } from '../../gfx';
 import { builtinResMgr } from '../../asset/asset-manager/builtin-res-mgr';
@@ -531,6 +531,29 @@ export class MeshRenderer extends ModelRenderer {
         this._enableMorph = value;
     }
 
+    /** Select an explicit morph implementation for comparisons. Compute requires WebGPU. */
+    get morphRenderingMode (): MorphRenderingMode {
+        return this._morphRenderingMode;
+    }
+
+    set morphRenderingMode (value: MorphRenderingMode) {
+        if (this._morphRenderingMode === value) return;
+        // Prefab instances may be configured before onLoad initializes weights.
+        if (!this._validateShapeWeights()) this._initSubMeshShapesWeights();
+        const previous = this._morphRenderingMode;
+        this._morphRenderingMode = value;
+        try {
+            this._watchMorphInMesh();
+        } catch (error) {
+            this._morphRenderingMode = previous;
+            throw error;
+        }
+        this._updateModels();
+        if (this.enabledInHierarchy) this._attachToScene();
+    }
+
+    private _morphRenderingMode: MorphRenderingMode = 'default';
+
     /**
      * @en Set the Separable-SSS skin standard model component.
      * @zh 设置是否是全局的4s标准模型组件
@@ -912,11 +935,24 @@ export class MeshRenderer extends ModelRenderer {
             return;
         }
 
+        // A component added to an active node can create its plain Model before
+        // receiving a mesh. Assigning a morph mesh must also change the model
+        // class; reinitializing a plain Model cannot enable morph macros/bindings.
+        if (this._morphInstance && this._modelType === scene.Model
+            && this._model && !(this._model instanceof MorphModel)) {
+            (cclegacy.director.root as Root).destroyModel(this._model);
+            this._model = null;
+            this._models.length = 0;
+        }
+
         const model = this._model;
         if (model) {
             model.destroy();
             model.initialize();
             model.node = model.transform = this.node;
+            if (this._morphInstance && model instanceof MorphModel) {
+                model.setMorphRendering(this._morphInstance);
+            }
         } else {
             this._createModel();
         }
@@ -1231,10 +1267,12 @@ export class MeshRenderer extends ModelRenderer {
     }
 
     private _watchMorphInMesh (): void {
-        if (this._morphInstance) {
-            this._morphInstance.destroy();
-            this._morphInstance = null;
-        }
+        // Create the replacement first so an unsupported forced mode cannot
+        // invalidate a renderer that is already using a working instance.
+        const replacement = this._enableMorph && this._mesh?.struct.morph && this._mesh.morphRendering
+            ? this._mesh.morphRendering.createInstance(this._morphRenderingMode) : null;
+        this._morphInstance?.destroy();
+        this._morphInstance = replacement;
 
         if (!this._enableMorph) {
             return;
@@ -1246,7 +1284,7 @@ export class MeshRenderer extends ModelRenderer {
             return;
         }
 
-        this._morphInstance = this._mesh.morphRendering.createInstance();
+        assertIsTrue(this._morphInstance !== null);
         const nSubMeshes = this._mesh.struct.primitives.length;
         for (let iSubMesh = 0; iSubMesh < nSubMeshes; ++iSubMesh) {
             this._uploadSubMeshShapesWeights(iSubMesh);

@@ -697,6 +697,8 @@ export class Mesh extends Asset {
      * @zh 释放此网格占有的所有 GPU 资源。
      */
     public destroyRenderingMesh (): void {
+        this.morphRendering?.destroy();
+        this.morphRendering = null;
         if (this._renderingSubMeshes) {
             for (let i = 0; i < this._renderingSubMeshes.length; i++) {
                 this._renderingSubMeshes[i].destroy();

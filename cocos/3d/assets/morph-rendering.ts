@@ -24,6 +24,7 @@
 
 import {
     AttributeName, Buffer, BufferUsageBit, Device, MemoryUsageBit, DescriptorSet, BufferInfo, FormatFeatureBit, Format, Texture, Sampler,
+    SamplerInfo, Filter, Address,
 } from '../../gfx';
 import { Mesh } from './mesh';
 import { Texture2D } from '../../asset/assets/texture-2d';
@@ -34,19 +35,18 @@ import { Morph, SubMeshMorph } from './morph';
 import { assertIsNonNullable, assertIsTrue, warn, bits, nextPow2, cclegacy, warnID } from '../../core';
 import { IMacroPatch } from '../../render-scene';
 import { TextureFilter, PixelFormat, WrapMode } from '../../asset/assets/asset-enum';
+import { WebGPUMorphCompute } from '../../gfx/webgpu/webgpu-morph-compute';
 
-/**
- * True if force to use cpu computing based sub-mesh rendering.
- * Only customizable by modify the internal engine code.
- */
-const preferCpuComputing = false;
+/** Explicit comparisons are opt-in; default preserves the existing target-count policy. */
+export type MorphRenderingMode = 'default' | 'cpu' | 'vs' | 'compute';
 
 /**
  * @en Interface for classes which control the rendering of morph resources.
  * @zh 支持形变网格渲染的基类。
  */
 export interface MorphRendering {
-    createInstance (): MorphRenderingInstance;
+    createInstance (mode?: MorphRenderingMode): MorphRenderingInstance;
+    destroy (): void;
 }
 
 /**
@@ -101,45 +101,65 @@ export function createMorphRendering (mesh: Mesh, gfxDevice: Device): MorphRende
  */
 export class StdMorphRendering implements MorphRendering {
     private declare _mesh: Mesh;
-    private _subMeshRenderings: (SubMeshMorphRendering | null)[] = [];
+    private readonly _renderings = new Map<MorphRenderingMode, Array<SubMeshMorphRendering | null>>();
 
-    constructor (mesh: Mesh, gfxDevice: Device) {
+    constructor (mesh: Mesh, private readonly _gfxDevice: Device) {
         this._mesh = mesh;
-        if (!this._mesh.struct.morph) {
-            return;
+        // Preserve initialization before Mesh may release its CPU data.
+        this._getRenderings('default');
+    }
+
+    private _getRenderings (mode: MorphRenderingMode): (SubMeshMorphRendering | null)[] {
+        if (mode !== 'default' && mode !== 'cpu' && mode !== 'vs' && mode !== 'compute') {
+            throw new Error(`Unknown morph rendering mode: ${String(mode)}`);
+        }
+        const existing = this._renderings.get(mode);
+        if (existing) return existing;
+        const morph = this._mesh.struct.morph;
+        if (!morph) return [];
+        if (mode !== 'default' && this._mesh.data.byteLength === 0) {
+            throw new Error('Selecting a new morph strategy requires mesh.allowDataAccess before mesh initialization.');
         }
 
         const nSubMeshes = this._mesh.struct.primitives.length;
-        this._subMeshRenderings = new Array(nSubMeshes).fill(null);
-        for (let iSubMesh = 0; iSubMesh < nSubMeshes; ++iSubMesh) {
-            const subMeshMorph = this._mesh.struct.morph.subMeshMorphs[iSubMesh];
-            if (!subMeshMorph) {
-                continue;
+        const renderings: (SubMeshMorphRendering | null)[] = new Array(nSubMeshes).fill(null);
+        try {
+            for (let iSubMesh = 0; iSubMesh < nSubMeshes; ++iSubMesh) {
+                const subMeshMorph = morph.subMeshMorphs[iSubMesh];
+                if (!subMeshMorph) continue;
+                if (mode === 'vs' && subMeshMorph.targets.length > UBOMorphEnum.MAX_MORPH_TARGET_COUNT) {
+                    throw new Error(`VS morph supports at most ${UBOMorphEnum.MAX_MORPH_TARGET_COUNT} targets.`);
+                }
+                if (mode === 'compute') {
+                    renderings[iSubMesh] = new ComputeComputing(this._mesh, iSubMesh, subMeshMorph, this._gfxDevice);
+                } else {
+                    const Rendering = mode === 'cpu'
+                        || (mode === 'default' && subMeshMorph.targets.length > UBOMorphEnum.MAX_MORPH_TARGET_COUNT)
+                        ? CpuComputing : GpuComputing;
+                    renderings[iSubMesh] = new Rendering(this._mesh, iSubMesh, morph, this._gfxDevice);
+                }
             }
-
-            if (preferCpuComputing || subMeshMorph.targets.length > UBOMorphEnum.MAX_MORPH_TARGET_COUNT) {
-                this._subMeshRenderings[iSubMesh] = new CpuComputing(
-                    this._mesh,
-                    iSubMesh,
-                    this._mesh.struct.morph,
-                    gfxDevice,
-                );
-            } else {
-                this._subMeshRenderings[iSubMesh] = new GpuComputing(
-                    this._mesh,
-                    iSubMesh,
-                    this._mesh.struct.morph,
-                    gfxDevice,
-                );
-            }
+        } catch (error) {
+            for (const rendering of renderings) rendering?.destroy?.();
+            throw error;
         }
+        this._renderings.set(mode, renderings);
+        return renderings;
     }
 
-    public createInstance (): MorphRenderingInstance {
+    public destroy (): void {
+        for (const renderings of this._renderings.values()) {
+            for (const rendering of renderings) rendering?.destroy?.();
+        }
+        this._renderings.clear();
+    }
+
+    public createInstance (mode: MorphRenderingMode = 'default'): MorphRenderingInstance {
+        const renderings = this._getRenderings(mode);
         const nSubMeshes = this._mesh.struct.primitives.length;
         const subMeshInstances: (SubMeshMorphRenderingInstance | null)[] = new Array(nSubMeshes);
         for (let iSubMesh = 0; iSubMesh < nSubMeshes; ++iSubMesh) {
-            subMeshInstances[iSubMesh] = this._subMeshRenderings[iSubMesh]?.createInstance() ?? null;
+            subMeshInstances[iSubMesh] = renderings[iSubMesh]?.createInstance() ?? null;
         }
         return {
             setWeights (subMeshIndex: number, weights: number[]): void {
@@ -156,8 +176,11 @@ export class StdMorphRendering implements MorphRendering {
                 assertIsNonNullable(subMeshMorph);
                 const patches: IMacroPatch[] = [
                     { name: 'CC_USE_MORPH', value: true },
-                    { name: 'CC_MORPH_TARGET_COUNT', value: subMeshMorph.targets.length },
                 ];
+                // Compute target count is runtime storage data, not a shader variant.
+                if (mode !== 'compute') {
+                    patches.push({ name: 'CC_MORPH_TARGET_COUNT', value: subMeshMorph.targets.length });
+                }
                 if (subMeshMorph.attributes.includes(AttributeName.ATTR_POSITION)) {
                     patches.push({ name: 'CC_MORPH_TARGET_HAS_POSITION', value: true });
                 }
@@ -193,6 +216,7 @@ interface SubMeshMorphRendering {
      * Creates a rendering instance.
      */
     createInstance (): SubMeshMorphRenderingInstance;
+    destroy? (): void;
 }
 
 /**
@@ -222,6 +246,59 @@ interface SubMeshMorphRenderingInstance {
      * Destroy this instance.
      */
     destroy (): void;
+}
+
+/** WebGPU compute produces the same displacement textures consumed by CPU-precomputed morph rendering. */
+class ComputeComputing implements SubMeshMorphRendering {
+    private readonly _compute: WebGPUMorphCompute;
+
+    constructor (mesh: Mesh, subMeshIndex: number, morph: SubMeshMorph, gfxDevice: Device) {
+        const vertexCount = mesh.struct.vertexBundles[mesh.struct.primitives[subMeshIndex].vertexBundelIndices[0]].view.count;
+        const layers = [AttributeName.ATTR_POSITION, AttributeName.ATTR_NORMAL, AttributeName.ATTR_TANGENT].map((name) => {
+            const attribute = morph.attributes.indexOf(name);
+            if (attribute < 0) return null;
+            return morph.targets.map((target) => {
+                const view = target.displacements[attribute];
+                return new Float32Array(mesh.data.buffer, mesh.data.byteOffset + view.offset, view.count);
+            });
+        });
+        this._compute = new WebGPUMorphCompute(gfxDevice, vertexCount, morph.targets.length, layers);
+        enableVertexId(mesh, subMeshIndex, gfxDevice);
+    }
+
+    public createInstance (): SubMeshMorphRenderingInstance {
+        const instance = this._compute.createInstance();
+        const uniforms = new MorphUniforms(this._compute.gfxDevice, 0);
+        uniforms.setMorphTextureInfo(this._compute.outputWidth, this._compute.outputHeight);
+        uniforms.commit();
+        const samplerInfo = new SamplerInfo(Filter.POINT, Filter.POINT, Filter.NONE, Address.CLAMP, Address.CLAMP, Address.CLAMP);
+        const sampler = this._compute.gfxDevice.getSampler(samplerInfo);
+        const bindings = [UNIFORM_POSITION_MORPH_TEXTURE_BINDING, UNIFORM_NORMAL_MORPH_TEXTURE_BINDING,
+            UNIFORM_TANGENT_MORPH_TEXTURE_BINDING];
+        return {
+            setWeights: (weights): void => instance.setWeights(weights),
+            requiredPatches: (): IMacroPatch[] => [
+                { name: 'CC_MORPH_TARGET_USE_TEXTURE', value: true },
+                { name: 'CC_MORPH_PRECOMPUTED', value: true },
+            ],
+            adaptPipelineState: (descriptorSet): void => {
+                for (let i = 0; i < bindings.length; ++i) {
+                    descriptorSet.bindTexture(bindings[i], instance.outputs[i]);
+                    descriptorSet.bindSampler(bindings[i], sampler);
+                }
+                descriptorSet.bindBuffer(UBOMorph.BINDING, uniforms.buffer);
+                descriptorSet.update();
+            },
+            destroy: (): void => {
+                uniforms.destroy();
+                instance.destroy();
+            },
+        };
+    }
+
+    public destroy (): void {
+        this._compute.destroy();
+    }
 }
 
 /**
@@ -333,7 +410,7 @@ class GpuComputing implements SubMeshMorphRendering {
             },
 
             destroy: (): void => {
-
+                morphUniforms.destroy();
             },
         };
     }
