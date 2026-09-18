@@ -1,0 +1,58 @@
+{
+  "name": "pal",
+  "version": "0.0.0",
+  "private": true,
+  "exports": {
+    "./minigame": {
+      "web": "../../pal/minigame/non-minigame.js",
+      "native": "../../pal/minigame/non-minigame.js",
+      "minigame": {
+        "alipay": "../../pal/minigame/alipay.js",
+        "baidu": "../../pal/minigame/baidu.js",
+        "bytedance": "../../pal/minigame/bytedance.js",
+        "non-minigame": "../../pal/minigame/non-minigame.js",
+        "runtime": "../../pal/minigame/runtime.js",
+        "taobao": "../../pal/minigame/taobao.js",
+        "taobao_minigame": "../../pal/minigame/taobao_minigame.js",
+        "wechat": "../../pal/minigame/wechat.js",
+        "wechat_mini_program": "../../pal/minigame/wechat_mini_program.js",
+        "xiaomi": "../../pal/minigame/xiaomi.js"
+      }
+    },
+    "./audio": {
+      "web": "../../pal/audio/web/player.js",
+      "native": "../../pal/audio/native/player.js",
+      "minigame": "../../pal/audio/minigame/player.js"
+    },
+    "./system-info": {
+      "web": "../../pal/system-info/web/system-info.js",
+      "native": "../../pal/system-info/native/system-info.js",
+      "minigame": "../../pal/system-info/minigame/system-info.js"
+    },
+    "./screen-adapter": {
+      "web": "../../pal/screen-adapter/web/screen-adapter.js",
+      "native": "../../pal/screen-adapter/native/screen-adapter.js",
+      "minigame": "../../pal/screen-adapter/minigame/screen-adapter.js"
+    },
+    "./input": {
+      "web": "../../pal/input/web/index.js",
+      "native": "../../pal/input/native/index.js",
+      "minigame": "../../pal/input/minigame/index.js"
+    },
+    "./env": {
+      "web": "../../pal/env/web/env.js",
+      "native": "../../pal/env/native/env.js",
+      "minigame": "../../pal/env/minigame/env.js"
+    },
+    "./pacer": {
+      "web": "../../pal/pacer/pacer-web.js",
+      "native": "../../pal/pacer/pacer-native.js",
+      "minigame": "../../pal/pacer/pacer-minigame.js"
+    },
+    "./wasm": {
+      "web": "../../pal/wasm/wasm-web.js",
+      "native": "../../pal/wasm/wasm-native.js",
+      "minigame": "../../pal/wasm/wasm-minigame.js"
+    }
+  }
+}

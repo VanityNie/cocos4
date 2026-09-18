@@ -482,8 +482,17 @@ export class WebGPUDevice extends Device {
     }
 
     private async initDevice (info: Readonly<DeviceInfo>): Promise<boolean> {
-        const gpu = navigator.gpu;
-        this._adapter = await gpu?.requestAdapter();
+        const gpu = globalThis.navigator?.gpu;
+        if (!gpu || typeof gpu.requestAdapter !== 'function') throw new Error('[WebGPU] GPU entry unavailable.');
+        console.warn('[WebGPU][requestAdapter] begin', new Error('requestAdapter caller').stack);
+        try {
+            this._adapter = await gpu.requestAdapter();
+        } catch (error) {
+            console.error('[WebGPU][requestAdapter] failed', error);
+            throw error;
+        }
+        if (!this._adapter) throw new Error('[WebGPU] requestAdapter returned null.');
+        console.log('[WebGPU][requestAdapter] success');
         const maxVertAttrs = this._adapter!.limits.maxVertexAttributes;
         const maxSampledTexPerShaderStage = this._adapter!.limits.maxSampledTexturesPerShaderStage;
         const submitFeatures: GPUFeatureName[] = [];
@@ -492,20 +501,51 @@ export class WebGPUDevice extends Device {
         } else {
             warn('Filterable 32-bit float textures support is not available');
         }
-        this._device = await this._adapter?.requestDevice({
-            requiredLimits: {
-                // Must be changed, default support for 16 is not enough
-                maxVertexAttributes: maxVertAttrs,
-                maxSampledTexturesPerShaderStage: maxSampledTexPerShaderStage,
-            },
+        console.log('[WebGPU][requestDevice] begin', JSON.stringify({
+            maxVertexAttributes: maxVertAttrs,
+            maxSampledTexturesPerShaderStage: maxSampledTexPerShaderStage,
             requiredFeatures: submitFeatures,
+        }));
+        try {
+            this._device = await this._adapter.requestDevice({
+                requiredLimits: {
+                    // Must be changed, default support for 16 is not enough
+                    maxVertexAttributes: maxVertAttrs,
+                    maxSampledTexturesPerShaderStage: maxSampledTexPerShaderStage,
+                },
+                requiredFeatures: submitFeatures,
+            });
+        } catch (error) {
+            console.error('[WebGPU][requestDevice] failed', error);
+            throw error;
+        }
+        const device = this._device as GPUDevice;
+        if (!device) throw new Error('[WebGPU] requestDevice returned no device.');
+        device.addEventListener('uncapturederror', (event) => {
+            console.error('[WebGPU][uncapturederror]', (event as GPUUncapturedErrorEvent).error);
         });
+        device.lost.then((lostInfo) => {
+            console.error('[WebGPU][device-lost]', lostInfo.reason, lostInfo.message);
+        }).catch((error) => console.error('[WebGPU][device-lost]', error));
+
+        // WeChat requires a configured presentation context before GPU resources
+        // are created. Swapchain initialization happens AFTER initDevice resolves.
+        const canvas = Device.canvas;
+        console.log('[WebGPU][canvas-configure] begin');
+        this._context = canvas.getContext('webgpu')!;
+        if (!this._context) throw new Error('[WebGPU] Main canvas rejected webgpu context; check runtime support and prior WebGL context creation.');
+        const presentationFormat = typeof gpu.getPreferredCanvasFormat === 'function'
+            ? gpu.getPreferredCanvasFormat() : 'bgra8unorm';
+        this._gpuConfig = { device, format: presentationFormat, alphaMode: 'opaque' };
+        this._context.configure(this._gpuConfig);
+        this._gfxAPI = API.WEBGPU;
+        this._swapchainFormat = WGPUFormatToGFXFormat(presentationFormat);
+        console.log('[WebGPU][canvas-configure] success; [shader-wasm] begin');
         await loadWebGPUWasmModule();
+        console.log('[WebGPU][shader-wasm] success');
         this._glslang = webGPU.glslang;
         this._twgsl = webGPU.twgsl;
 
-        this._gfxAPI = API.WEBGPU;
-        this._swapchainFormat = WGPUFormatToGFXFormat(navigator.gpu.getPreferredCanvasFormat());
         const mapping = this._bindingMappingInfo = info.bindingMappingInfo;
         const blockOffsets: number[] = [];
         const samplerTextureOffsets: number[] = [];
@@ -531,14 +571,10 @@ export class WebGPUDevice extends Device {
             flexibleSet: mapping.setIndices[mappingIdxSize - 1],
         };
 
-        const canvas = Device.canvas;
-        this._context = canvas.getContext('webgpu')!;
-        const device: GPUDevice = this._device as GPUDevice;
-
         const adapterInfo = this._adapter!.info;
-        this._vendor = adapterInfo.vendor;
-        this._renderer = adapterInfo.device;
-        const description = adapterInfo.description;
+        this._vendor = adapterInfo?.vendor || 'unknown';
+        this._renderer = adapterInfo?.device || 'unknown';
+        const description = adapterInfo?.description || 'unavailable';
 
         const limits =  this._adapter!.limits;
         this._caps.clipSpaceMinZ = 0.0;

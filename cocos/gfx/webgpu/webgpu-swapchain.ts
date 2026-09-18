@@ -29,7 +29,6 @@ import { Swapchain } from '../base/swapchain';
 import { WebGPUTexture } from './webgpu-texture';
 import { debug, warn, warnID } from '../../core';
 import { WebGPUDeviceManager } from './define';
-import { GFXFormatToWGPUFormat } from './webgpu-commands';
 import { IWebGPUBlitManager } from './webgpu-gpu-objects';
 /**
  * @en GFX Swapchain implementation based on WebGPU.
@@ -47,12 +46,18 @@ export class WebGPUSwapchain extends Swapchain {
     public initialize (info: Readonly<SwapchainInfo>): void {
         this._canvas = info.windowHandle;
         const { width, height } = info;
-        this._canvas.width = width;
-        this._canvas.height = height;
+        const sizeChanged = this._canvas.width !== width || this._canvas.height !== height;
+        if (sizeChanged) {
+            this._canvas.width = width;
+            this._canvas.height = height;
+        }
 
         this._webGPUDeviceLostHandler = this._onWebGPUDeviceLost.bind(this);
         const device = WebGPUDeviceManager.instance;
         const nativeDevice = device.nativeDevice as GPUDevice;
+        // The initial configure was completed by initDevice before any resources.
+        // Reconfigure only if the final presentation size changed in the meantime.
+        if (sizeChanged) device.context.configure(device.gpuConfig);
         nativeDevice.lost.then(this._webGPUDeviceLostHandler).catch((reasons) => {
             // noop
         });
@@ -168,17 +173,6 @@ export class WebGPUSwapchain extends Swapchain {
     private _createTexture (width: number, height: number): WebGPUTexture {
         const device = WebGPUDeviceManager.instance;
         const gfxSwapchainFormat = device.swapchainFormat;
-        const swapchainFormat = GFXFormatToWGPUFormat(gfxSwapchainFormat);// navigator.gpu.getPreferredCanvasFormat();
-        if (!this._colorTexture) {
-            const nativeDevice = device.nativeDevice as GPUDevice;
-            const gpuConfig: GPUCanvasConfiguration = {
-                device: nativeDevice,
-                format: swapchainFormat,
-                alphaMode: 'opaque',
-            };
-            device.gpuConfig = gpuConfig;
-            device.context.configure(gpuConfig);
-        }
         this._colorTexture = new WebGPUTexture();
         this._colorTexture.initAsSwapchainTexture({
             swapchain: this,

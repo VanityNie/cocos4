@@ -1,7 +1,25 @@
+console.warn('[WebGPU][boot-v3] game.js evaluated');
+GameGlobal.__webgpuBootTrace = { stage: 'game-evaluated', events: [] };
+function __traceWebGPUBoot(stage) {
+    const trace = GameGlobal.__webgpuBootTrace;
+    trace.stage = stage;
+    trace.events.push({ stage: stage, time: Date.now() });
+    console.warn('[WebGPU][boot-v3] ' + stage);
+}
 function __initApp () {  // init app
+__traceWebGPUBoot('initApp-enter');
 globalThis.__wxRequire = require;  // FIX: require cannot work in separate engine 
-require('./web-adapter');
-const firstScreen = require('./first-screen');
+// Engine WebGPU template v1
+var window = GameGlobal;
+const webgpuEnabled = <%= typeof useWebGPU !== 'undefined' && useWebGPU ? 'true' : 'false' %>; // ENGINE_WEBGPU_BUILD_FLAG
+GameGlobal.__cocosWebGPUEnabled = webgpuEnabled;
+let firstScreen;
+if (webgpuEnabled) {
+<%- include('../../scripts/wechat-webgpu/wechat-webgpu-bootstrap.js').replace('const firstScreen =', 'firstScreen =') %>
+} else {
+    require('./web-adapter');
+    firstScreen = require('./first-screen');
+}
 
 <%- include(cocosTemplate, {}) %>
 
@@ -72,9 +90,16 @@ function onApplicationCreated(application) {
 }  // init app
 
 // NOTE: on WeChat Android end, we can only get the correct screen size at the second tick of game.
+__traceWebGPUBoot('system-info-begin');
 var sysInfo = wx.getSystemInfoSync();
+__traceWebGPUBoot('system-info-end:' + sysInfo.platform);
 if (sysInfo.platform.toLocaleLowerCase() === 'android') {
-    GameGlobal.requestAnimationFrame (__initApp);
+    __traceWebGPUBoot('raf-schedule');
+    GameGlobal.requestAnimationFrame(function () {
+        __traceWebGPUBoot('raf-fired');
+        __initApp();
+    });
+    __traceWebGPUBoot('raf-scheduled');
 } else {
     __initApp();
 }

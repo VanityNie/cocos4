@@ -23,7 +23,7 @@
  THE SOFTWARE.
 */
 
-import { EDITOR, JSB } from 'internal:constants';
+import { EDITOR, JSB, WECHAT } from 'internal:constants';
 import { cclegacy, getError, sys, screen, settings, errorID, Settings } from '../core';
 import { BindingMappingInfo, DeviceInfo, SwapchainInfo } from './base/define';
 import { Device } from './base/device';
@@ -155,15 +155,18 @@ export class DeviceManager {
                 this._gfxDevice = gfx.DeviceManager.create(deviceInfo);
             } else {
                 let useWebGL2 = (!!globalThis.WebGL2RenderingContext);
-                const userAgent = globalThis.navigator.userAgent.toLowerCase();
                 // UC browser implementation doesn't conform to WebGL2 standard
                 if (sys.browserType === BrowserType.UC) {
                     useWebGL2 = false;
                 }
                 Device.canvas = canvas!;
+                if (this._renderType === RenderType.WEBGPU && !cclegacy.WebGPUDevice) {
+                    throw new Error('[WebGPU] gfx-webgpu backend is missing from the build.');
+                }
                 if (this._renderType === RenderType.WEBGPU && cclegacy.WebGPUDevice) {
                     return new Promise<boolean>((resolve, reject) => {
                         this._tryInitializeWebGPUDevice(cclegacy.WebGPUDevice, deviceInfo).then((val) => {
+                            if (!val) throw new Error('[WebGPU] Device initialization returned false.');
                             this._initSwapchain();
                             resolve(val);
                         }).catch((err) => {
@@ -197,6 +200,9 @@ export class DeviceManager {
     }
 
     private _initSwapchain (): void {
+        if (!this._deviceInitialized || !this._gfxDevice) {
+            throw new Error('[GFX] No initialized device; check runtime GPU availability and enabled graphics modules.');
+        }
         const swapchainInfo = new SwapchainInfo(1, this._canvas!);
         const windowSize = screen.windowSize;
         swapchainInfo.width = windowSize.width;
@@ -205,7 +211,7 @@ export class DeviceManager {
     }
 
     private _supportWebGPU (): boolean {
-        return 'gpu' in globalThis.navigator;
+        return typeof globalThis.navigator?.gpu?.requestAdapter === 'function';
     }
 
     private _determineRenderType (renderMode: LegacyRenderMode): RenderType {
@@ -220,6 +226,9 @@ export class DeviceManager {
             renderType = RenderType.CANVAS;
             supportRender = true;
         } else if (renderMode === LegacyRenderMode.AUTO || renderMode === LegacyRenderMode.WEBGPU) {
+            if (WECHAT && renderMode === LegacyRenderMode.WEBGPU && !this._supportWebGPU()) {
+                throw new Error('[WebGPU] WeChat runtime navigator.gpu.requestAdapter is unavailable after adapter injection.');
+            }
             renderType = (this._supportWebGPU() && !EDITOR) ? RenderType.WEBGPU : RenderType.WEBGL;
             supportRender = true;
         } else if (renderMode === LegacyRenderMode.WEBGL) {

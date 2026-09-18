@@ -35,4 +35,5 @@ function copyDir(s, d) {
 // 只清除 bin/adapter（不动 bin 下其它产物，如 .editor / .cache 等）
 fs.rmSync(dst, { recursive: true, force: true });
 copyDir(src, dst);
+require('./wechat-webgpu/build-adapter.cjs').build().catch(e => { console.error(e); process.exitCode = 1; });
 console.log(`[spread-adapter] 已复制 ${count} 个文件: ${src} -> ${dst}`);

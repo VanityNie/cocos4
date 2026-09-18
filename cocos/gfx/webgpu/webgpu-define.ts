@@ -36,7 +36,7 @@ import {
 } from '../base/define';
 
 import { ccwindow } from '../../core/global-exports';
-import { warn } from 'console';
+import { warn } from '../../core/platform/debug';
 
 
 WEBGPU && promiseForWebGPUInstantiation.then(() => {

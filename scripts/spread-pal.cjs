@@ -46,3 +46,4 @@ function copyDir(s, d) {
 removeExisting(dst);
 copyDir(src, dst);
 console.log(`[spread-pal] 已复制 ${count} 个文件: ${src} -> ${dst}`);
+require('./creator-pal-exports.cjs');

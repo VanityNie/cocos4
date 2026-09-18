@@ -124,6 +124,7 @@ export async function waitForWebGPUWasmInstantiation (): Promise<void> {
         }
     } catch (error) {
         errorReport(error);
+        throw error;
     }
 }
 

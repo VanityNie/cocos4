@@ -8,6 +8,7 @@
     "AUTHORS.txt"
   ],
   "module": "index.js",
+  "workspaces": ["scripts/creator-pal-exports"],
   "engines": {
     "node": ">=18.0.0"
   },

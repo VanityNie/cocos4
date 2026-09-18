@@ -25,7 +25,9 @@
 /* eslint-disable @typescript-eslint/no-namespace */
 import type { Color, Vec2 } from '../core';
 
-export * from 'internal:native';
+// cc.config maps internal:native to this same implementation on every platform.
+// A relative import is also resolvable by Creator 3.8's quick compiler.
+export * from './impl';
 
 /**
  * @zh 该对象提供由原生绑定出来的 JavaScript 接口。
