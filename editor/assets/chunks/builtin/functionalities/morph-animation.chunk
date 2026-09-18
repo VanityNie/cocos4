@@ -61,6 +61,10 @@ float getDisplacementWeight(int index) {
 
 vec3 getVec3DisplacementFromTexture(sampler2D tex, int vertexIndex) {
 #if CC_MORPH_PRECOMPUTED
+  #if CC_MORPH_BATCHED
+    // .w is a stable atlas row offset; CPU and native paths keep their existing contract.
+    vertexIndex += int(cc_displacementTextureInfo.w) * int(cc_displacementTextureInfo.x);
+  #endif
   return fetchVec3ArrayFromTexture(tex, vertexIndex).rgb;
 #else
   vec3 result = vec3(0, 0, 0);

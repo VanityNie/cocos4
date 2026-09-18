@@ -38,7 +38,7 @@ import { TextureFilter, PixelFormat, WrapMode } from '../../asset/assets/asset-e
 import { WebGPUMorphCompute } from '../../gfx/webgpu/webgpu-morph-compute';
 
 /** Explicit comparisons are opt-in; default preserves the existing target-count policy. */
-export type MorphRenderingMode = 'default' | 'cpu' | 'vs' | 'compute';
+export type MorphRenderingMode = 'default' | 'cpu' | 'vs' | 'compute' | 'compute-single';
 
 /**
  * @en Interface for classes which control the rendering of morph resources.
@@ -110,7 +110,7 @@ export class StdMorphRendering implements MorphRendering {
     }
 
     private _getRenderings (mode: MorphRenderingMode): (SubMeshMorphRendering | null)[] {
-        if (mode !== 'default' && mode !== 'cpu' && mode !== 'vs' && mode !== 'compute') {
+        if (mode !== 'default' && mode !== 'cpu' && mode !== 'vs' && mode !== 'compute' && mode !== 'compute-single') {
             throw new Error(`Unknown morph rendering mode: ${String(mode)}`);
         }
         const existing = this._renderings.get(mode);
@@ -130,8 +130,14 @@ export class StdMorphRendering implements MorphRendering {
                 if (mode === 'vs' && subMeshMorph.targets.length > UBOMorphEnum.MAX_MORPH_TARGET_COUNT) {
                     throw new Error(`VS morph supports at most ${UBOMorphEnum.MAX_MORPH_TARGET_COUNT} targets.`);
                 }
-                if (mode === 'compute') {
-                    renderings[iSubMesh] = new ComputeComputing(this._mesh, iSubMesh, subMeshMorph, this._gfxDevice);
+                if (mode === 'compute' || mode === 'compute-single') {
+                    renderings[iSubMesh] = new ComputeComputing(
+                        this._mesh,
+                        iSubMesh,
+                        subMeshMorph,
+                        this._gfxDevice,
+                        mode === 'compute-single' ? 1 : 64,
+                    );
                 } else {
                     const Rendering = mode === 'cpu'
                         || (mode === 'default' && subMeshMorph.targets.length > UBOMorphEnum.MAX_MORPH_TARGET_COUNT)
@@ -178,7 +184,7 @@ export class StdMorphRendering implements MorphRendering {
                     { name: 'CC_USE_MORPH', value: true },
                 ];
                 // Compute target count is runtime storage data, not a shader variant.
-                if (mode !== 'compute') {
+                if (mode !== 'compute' && mode !== 'compute-single') {
                     patches.push({ name: 'CC_MORPH_TARGET_COUNT', value: subMeshMorph.targets.length });
                 }
                 if (subMeshMorph.attributes.includes(AttributeName.ATTR_POSITION)) {
@@ -252,7 +258,7 @@ interface SubMeshMorphRenderingInstance {
 class ComputeComputing implements SubMeshMorphRendering {
     private readonly _compute: WebGPUMorphCompute;
 
-    constructor (mesh: Mesh, subMeshIndex: number, morph: SubMeshMorph, gfxDevice: Device) {
+    constructor (mesh: Mesh, subMeshIndex: number, morph: SubMeshMorph, gfxDevice: Device, maxBatchSize: number) {
         const vertexCount = mesh.struct.vertexBundles[mesh.struct.primitives[subMeshIndex].vertexBundelIndices[0]].view.count;
         const layers = [AttributeName.ATTR_POSITION, AttributeName.ATTR_NORMAL, AttributeName.ATTR_TANGENT].map((name) => {
             const attribute = morph.attributes.indexOf(name);
@@ -262,14 +268,15 @@ class ComputeComputing implements SubMeshMorphRendering {
                 return new Float32Array(mesh.data.buffer, mesh.data.byteOffset + view.offset, view.count);
             });
         });
-        this._compute = new WebGPUMorphCompute(gfxDevice, vertexCount, morph.targets.length, layers);
+        this._compute = new WebGPUMorphCompute(gfxDevice, vertexCount, morph.targets.length, layers, maxBatchSize);
         enableVertexId(mesh, subMeshIndex, gfxDevice);
     }
 
     public createInstance (): SubMeshMorphRenderingInstance {
         const instance = this._compute.createInstance();
         const uniforms = new MorphUniforms(this._compute.gfxDevice, 0);
-        uniforms.setMorphTextureInfo(this._compute.outputWidth, this._compute.outputHeight);
+        uniforms.setMorphTextureInfo(instance.outputWidth, instance.outputHeight);
+        uniforms.setOutputRowOffset(instance.outputRowOffset);
         uniforms.commit();
         const samplerInfo = new SamplerInfo(Filter.POINT, Filter.POINT, Filter.NONE, Address.CLAMP, Address.CLAMP, Address.CLAMP);
         const sampler = this._compute.gfxDevice.getSampler(samplerInfo);
@@ -280,10 +287,13 @@ class ComputeComputing implements SubMeshMorphRendering {
             requiredPatches: (): IMacroPatch[] => [
                 { name: 'CC_MORPH_TARGET_USE_TEXTURE', value: true },
                 { name: 'CC_MORPH_PRECOMPUTED', value: true },
+                { name: 'CC_MORPH_BATCHED', value: true },
             ],
             adaptPipelineState: (descriptorSet): void => {
                 for (let i = 0; i < bindings.length; ++i) {
-                    descriptorSet.bindTexture(bindings[i], instance.outputs[i]);
+                    const output = instance.outputs[i];
+                    if (!output) continue;
+                    descriptorSet.bindTexture(bindings[i], output);
                     descriptorSet.bindSampler(bindings[i], sampler);
                 }
                 descriptorSet.bindBuffer(UBOMorph.BINDING, uniforms.buffer);
@@ -602,6 +612,10 @@ class MorphUniforms {
     public setVerticesCount (count: number): void {
         const isLittleEndian = cclegacy.sys.isLittleEndian as boolean;
         this._localBuffer.setFloat32(UBOMorphEnum.OFFSET_OF_VERTICES_COUNT, count, isLittleEndian);
+    }
+
+    public setOutputRowOffset (row: number): void {
+        this._localBuffer.setFloat32(UBOMorphEnum.OFFSET_OF_OUTPUT_ROW, row, cclegacy.sys.isLittleEndian as boolean);
     }
 
     public commit (): void {

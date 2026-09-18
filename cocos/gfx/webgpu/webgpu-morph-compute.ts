@@ -12,56 +12,73 @@ import type { WebGPUDevice } from './webgpu-device';
 // Compute is a WebGPU implementation detail. Its outputs use the existing
 // CC_MORPH_PRECOMPUTED texture contract, shared with CPU morph rendering.
 // The input texture is target-major within each position/normal/tangent array layer.
-const morphComputeSource = `
-struct MorphInfo { vertexCount: u32, targetCount: u32, width: u32, attributes: u32 }
+function morphComputeSource (attributes: readonly number[]): string {
+    const accumulate = `
+        let pixel = targetIndex * info.vertexCount + vertex;
+        let uv = vec2<i32>(i32(pixel % info.width), i32(pixel / info.width));
+        ${attributes.map((attribute, layer) => `sum${attribute} += textureLoad(targets, uv, ${layer}, 0).xyz * weight;`).join('\n        ')}`;
+    return `
+struct MorphInfo { vertexCount: u32, targetCount: u32, width: u32, outputRows: u32 }
 @group(0) @binding(0) var targets: texture_2d_array<f32>;
-@group(0) @binding(1) var<storage, read> weights: array<f32>;
-@group(0) @binding(2) var positions: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(1) var<storage, read> weights: array<u32>;
 @group(0) @binding(3) var<uniform> info: MorphInfo;
-@group(0) @binding(4) var normals: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(5) var tangents: texture_storage_2d<rgba32float, write>;
+${attributes.map((attribute) => `@group(0) @binding(${outputBindings[attribute]}) var output${attribute}: texture_storage_2d<rgba32float, write>;`).join('\n')}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
     let vertex = id.x + id.y * groups.x * 64u;
     if (vertex >= info.vertexCount) { return; }
-    var position = vec3<f32>(0.0);
-    var normal = vec3<f32>(0.0);
-    var tangent = vec3<f32>(0.0);
-    for (var targetIndex = 0u; targetIndex < info.targetCount; targetIndex++) {
-        let weight = weights[targetIndex];
-        if (weight == 0.0) { continue; }
-        let pixel = targetIndex * info.vertexCount + vertex;
-        let uv = vec2<i32>(i32(pixel % info.width), i32(pixel / info.width));
-        if ((info.attributes & 1u) != 0u) { position += textureLoad(targets, uv, 0, 0).xyz * weight; }
-        if ((info.attributes & 2u) != 0u) { normal += textureLoad(targets, uv, 1, 0).xyz * weight; }
-        if ((info.attributes & 4u) != 0u) { tangent += textureLoad(targets, uv, 2, 0).xyz * weight; }
+    // Z indexes compact dirty records; the first word maps back to a stable atlas slot.
+    let record = id.z * max(4u, 3u + info.targetCount);
+    let slot = weights[record];
+    let count = weights[record + 1u];
+    let sparse = weights[record + 2u];
+    let data = record + 3u;
+    ${attributes.map((attribute) => `var sum${attribute} = vec3<f32>(0.0);`).join('\n    ')}
+    if (sparse != 0u) {
+        for (var entry = 0u; entry < count; entry++) {
+            let targetIndex = weights[data + entry * 2u];
+            let weight = bitcast<f32>(weights[data + entry * 2u + 1u]);
+            ${accumulate}
+        }
+    } else {
+        for (var targetIndex = 0u; targetIndex < count; targetIndex++) {
+            let weight = bitcast<f32>(weights[data + targetIndex]);
+            if (weight == 0.0) { continue; }
+            ${accumulate}
+        }
     }
-    let outputWidth = textureDimensions(positions).x;
-    let outputUV = vec2<i32>(i32(vertex % outputWidth), i32(vertex / outputWidth));
-    textureStore(positions, outputUV, vec4<f32>(position, 0.0));
-    textureStore(normals, outputUV, vec4<f32>(normal, 0.0));
-    textureStore(tangents, outputUV, vec4<f32>(tangent, 0.0));
+    let outputWidth = textureDimensions(output${attributes[0]}).x;
+    let outputUV = vec2<i32>(i32(vertex % outputWidth), i32(vertex / outputWidth + slot * info.outputRows));
+    ${attributes.map((attribute) => `textureStore(output${attribute}, outputUV, vec4<f32>(sum${attribute}, 0.0));`).join('\n    ')}
 }`;
+}
 
-const pending = new WeakMap<GPUDevice, Set<WebGPUMorphComputeInstance>>();
-const pipelines = new WeakMap<GPUDevice, GPUComputePipeline>();
+const outputBindings = [2, 4, 5];
 
-/** Called before every render pass, including shadow passes. Queue ordering makes
- * these writes visible to all subsequently submitted render command buffers. */
-export function flushWebGPUMorphComputes (device: GPUDevice): number {
-    const instances = pending.get(device);
-    if (!instances?.size) return 0;
-    const dispatchCount = instances.size;
-    const encoder = device.createCommandEncoder({ label: 'Morph compute before rendering' });
+const pending = new WeakMap<GPUDevice, Set<WebGPUMorphComputeBatch>>();
+const pipelines = new WeakMap<GPUDevice, Map<number, GPUComputePipeline>>();
+
+/** Record before the consuming render pass in the same encoder. The caller submits
+ * immediately after recording rendering; weight uploads are queue operations. */
+export function flushWebGPUMorphComputes (device: GPUDevice, encoder: GPUCommandEncoder): number {
+    const batches = pending.get(device);
+    if (!batches?.size) return 0;
+    const dispatchCount = batches.size;
     const pass = encoder.beginComputePass({ label: 'Morph displacement blend' });
-    for (const instance of instances) instance.dispatch(pass);
+    let pipeline: GPUComputePipeline | undefined;
+    for (const batch of batches) {
+        if (pipeline !== batch.owner.pipeline) {
+            pipeline = batch.owner.pipeline;
+            pass.setPipeline(pipeline);
+        }
+        batch.dispatch(pass);
+    }
     pass.end();
-    device.queue.submit([encoder.finish()]);
-    instances.clear();
+    batches.clear();
     return dispatchCount;
 }
 
-/** Mesh-owned static input. Only weights and output are allocated per renderer. */
+/** Mesh-owned input and fixed atlas pages. Renderers keep stable slots until destroyed. */
 export class WebGPUMorphCompute {
     public readonly device: GPUDevice;
     public readonly pipeline: GPUComputePipeline;
@@ -71,7 +88,14 @@ export class WebGPUMorphCompute {
     public readonly groupsY: number;
     public readonly outputWidth: number;
     public readonly outputHeight: number;
+    /** Semantic indices (position=0, normal=1, tangent=2), packed into input layers. */
+    public readonly attributes: readonly number[];
+    public readonly weightsSize: number;
+    public readonly batchCapacity: number;
+    private readonly _textureBytes: number;
+    private readonly _batches: WebGPUMorphComputeBatch[] = [];
     private readonly _instances = new Set<WebGPUMorphComputeInstance>();
+    private _destroyed = false;
 
     constructor (
         public readonly gfxDevice: Device,
@@ -79,11 +103,19 @@ export class WebGPUMorphCompute {
         public readonly targetCount: number,
         // A null layer denotes an absent morph attribute; it is never read.
         layers: readonly (readonly Float32Array[] | null)[],
+        maxBatchSize = 64,
     ) {
         if (gfxDevice.gfxAPI !== API.WEBGPU) throw new Error('Compute morph rendering requires WebGPU.');
         this.device = (gfxDevice as WebGPUDevice).nativeDevice!;
         const device = this.device;
         const limits = device.limits;
+        this.attributes = [0, 1, 2].filter((attribute) => layers[attribute] !== null && layers[attribute] !== undefined);
+        if (!this.attributes.length) throw new Error('Compute morph requires at least one displacement attribute.');
+        const attributeMask = this.attributes.reduce((mask, attribute) => mask | (1 << attribute), 0);
+        if (!Number.isInteger(maxBatchSize) || maxBatchSize < 1) throw new Error('Morph batch size must be a positive integer.');
+        // Slot, count, sparse flag, then either T dense weights or K (target, weight) pairs.
+        // Sparse encoding is selected only when 2K < T, so it never enlarges the payload.
+        this.weightsSize = Math.max(16, 12 + targetCount * 4);
         const pixels = Math.max(1, vertexCount * targetCount);
         const width = Math.min(pixels, limits.maxTextureDimension2D);
         const height = Math.ceil(pixels / width);
@@ -91,44 +123,58 @@ export class WebGPUMorphCompute {
         this.outputHeight = Math.max(1, Math.ceil(vertexCount / this.outputWidth));
         if (height > limits.maxTextureDimension2D
             || this.outputHeight > limits.maxTextureDimension2D
-            || Math.max(4, targetCount * 4) > limits.maxStorageBufferBindingSize
-            || Math.max(4, targetCount * 4) > limits.maxBufferSize) {
+            || this.weightsSize > limits.maxStorageBufferBindingSize
+            || this.weightsSize > limits.maxBufferSize) {
             throw new Error('Morph data exceeds the WebGPU device texture or storage buffer limits.');
         }
         const groups = Math.max(1, Math.ceil(vertexCount / 64));
         this.groupsX = Math.min(groups, limits.maxComputeWorkgroupsPerDimension);
         this.groupsY = Math.ceil(groups / this.groupsX);
         if (this.groupsY > limits.maxComputeWorkgroupsPerDimension) throw new Error('Morph vertex count exceeds WebGPU dispatch limits.');
-        let pipeline = pipelines.get(device);
+        const instanceOutputBytes = this.outputWidth * this.outputHeight * 16 * this.attributes.length;
+        // Bound reserved output memory to 8 MiB/page, except when one instance needs more.
+        this.batchCapacity = Math.min(
+            maxBatchSize,
+            limits.maxComputeWorkgroupsPerDimension,
+            Math.floor(limits.maxTextureDimension2D / this.outputHeight),
+            Math.floor(Math.min(limits.maxStorageBufferBindingSize, limits.maxBufferSize) / this.weightsSize),
+            Math.max(1, Math.floor(8 * 1024 * 1024 / instanceOutputBytes)),
+        );
+        let devicePipelines = pipelines.get(device);
+        if (!devicePipelines) {
+            devicePipelines = new Map();
+            pipelines.set(device, devicePipelines);
+        }
+        let pipeline = devicePipelines.get(attributeMask);
         if (!pipeline) {
             const layout = device.createBindGroupLayout({ entries: [
                 { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba32float' } },
                 { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba32float' } },
-                { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba32float' } },
+                ...this.attributes.map((attribute): GPUBindGroupLayoutEntry => ({
+                    binding: outputBindings[attribute],
+                    visibility: GPUShaderStage.COMPUTE,
+                    storageTexture: { access: 'write-only', format: 'rgba32float' },
+                })),
             ] });
             pipeline = device.createComputePipeline({
                 label: 'Morph displacement blend',
                 layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-                compute: { module: device.createShaderModule({ code: morphComputeSource }), entryPoint: 'main' },
+                compute: { module: device.createShaderModule({ code: morphComputeSource(this.attributes) }), entryPoint: 'main' },
             });
-            pipelines.set(device, pipeline);
+            devicePipelines.set(attributeMask, pipeline);
         }
         this.pipeline = pipeline;
         this.texture = device.createTexture({
             label: 'Shared morph targets',
-            size: [width, height, 3],
+            size: [width, height, this.attributes.length],
             format: 'rgba32float',
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
         });
-        let attributes = 0;
-        for (let layer = 0; layer < 3; ++layer) {
-            const targets = layers[layer];
-            if (!targets) continue;
-            attributes |= 1 << layer;
-            const pixels = new Float32Array(width * height * 4);
+        const uploadPixels = new Float32Array(width * height * 4);
+        for (let layer = 0; layer < this.attributes.length; ++layer) {
+            const targets = layers[this.attributes[layer]]!;
+            const pixels = uploadPixels;
             for (let target = 0; target < targetCount; ++target) {
                 const source = targets[target];
                 for (let vertex = 0; vertex < vertexCount; ++vertex) {
@@ -146,11 +192,20 @@ export class WebGPUMorphCompute {
             );
         }
         this.info = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        device.queue.writeBuffer(this.info, 0, new Uint32Array([vertexCount, targetCount, width, attributes]));
+        device.queue.writeBuffer(this.info, 0, new Uint32Array([vertexCount, targetCount, width, this.outputHeight]));
+        this._textureBytes = width * height * this.attributes.length * 16;
+        gfxDevice.memoryStatus.textureSize += this._textureBytes;
+        gfxDevice.memoryStatus.bufferSize += 16;
     }
 
     public createInstance (): WebGPUMorphComputeInstance {
-        const instance = new WebGPUMorphComputeInstance(this);
+        if (this._destroyed) throw new Error('Morph compute has been destroyed.');
+        let batch = this._batches.find((candidate) => candidate.hasSpace);
+        if (!batch) {
+            batch = new WebGPUMorphComputeBatch(this);
+            this._batches.push(batch);
+        }
+        const instance = batch.createInstance();
         this._instances.add(instance);
         return instance;
     }
@@ -159,42 +214,122 @@ export class WebGPUMorphCompute {
         this._instances.delete(instance);
     }
 
+    public releaseBatch (batch: WebGPUMorphComputeBatch): void {
+        const index = this._batches.indexOf(batch);
+        if (index >= 0) this._batches.splice(index, 1);
+    }
+
     public destroy (): void {
+        if (this._destroyed) return;
+        this._destroyed = true;
         for (const instance of this._instances) instance.destroy();
         this.texture.destroy();
         this.info.destroy();
+        this.gfxDevice.memoryStatus.textureSize -= this._textureBytes;
+        this.gfxDevice.memoryStatus.bufferSize -= 16;
+    }
+}
+
+/** One stable output atlas and one compact dirty-weight upload per dispatch. */
+class WebGPUMorphComputeBatch {
+    public readonly outputs: readonly (Texture | null)[];
+    private readonly _weights: GPUBuffer;
+    private readonly _packedWeights: Uint32Array;
+    private readonly _packedFloats: Float32Array;
+    private readonly _bindings: GPUBindGroup;
+    private readonly _freeSlots: number[];
+    private readonly _dirty = new Set<WebGPUMorphComputeInstance>();
+    private _liveCount = 0;
+
+    constructor (public readonly owner: WebGPUMorphCompute) {
+        const device = owner.device;
+        this.outputs = [0, 1, 2].map((attribute) => (owner.attributes.includes(attribute) ? owner.gfxDevice.createTexture(new TextureInfo(
+            TextureType.TEX2D,
+            TextureUsageBit.STORAGE | TextureUsageBit.SAMPLED,
+            Format.RGBA32F,
+            owner.outputWidth,
+            owner.outputHeight * owner.batchCapacity,
+        )) : null));
+        const bytes = owner.weightsSize * owner.batchCapacity;
+        this._weights = device.createBuffer({ label: 'Morph batch weights',
+            size: bytes,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        owner.gfxDevice.memoryStatus.bufferSize += bytes;
+        this._packedWeights = new Uint32Array(bytes / 4);
+        this._packedFloats = new Float32Array(this._packedWeights.buffer);
+        this._freeSlots = Array.from({ length: owner.batchCapacity }, (_, i) => owner.batchCapacity - 1 - i);
+        this._bindings = device.createBindGroup({ layout: owner.pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: owner.texture.createView({ dimension: '2d-array' }) },
+                { binding: 1, resource: { buffer: this._weights } },
+                { binding: 3, resource: { buffer: owner.info } },
+                ...owner.attributes.map((attribute) => ({
+                    binding: outputBindings[attribute],
+                    resource: (this.outputs[attribute] as WebGPUTexture).gpuTexture.gpuTexture!.createView(),
+                })),
+            ] });
+    }
+
+    public get hasSpace (): boolean { return this._freeSlots.length > 0; }
+
+    public createInstance (): WebGPUMorphComputeInstance {
+        const slot = this._freeSlots.pop();
+        if (slot === undefined) throw new Error('Morph batch is full.');
+        ++this._liveCount;
+        const instance = new WebGPUMorphComputeInstance(this, slot);
+        this.markDirty(instance); // Clear a new or recycled output slot, including zero weights.
+        return instance;
+    }
+
+    public markDirty (instance: WebGPUMorphComputeInstance): void {
+        this._dirty.add(instance);
+        let batches = pending.get(this.owner.device);
+        if (!batches) {
+            batches = new Set();
+            pending.set(this.owner.device, batches);
+        }
+        batches.add(this);
+    }
+
+    public dispatch (pass: GPUComputePassEncoder): void {
+        const stride = this.owner.weightsSize / 4;
+        let record = 0;
+        for (const instance of this._dirty) {
+            instance.pack(this._packedWeights, this._packedFloats, record++ * stride);
+        }
+        this.owner.device.queue.writeBuffer(this._weights, 0, this._packedWeights.buffer, 0, record * this.owner.weightsSize);
+        pass.setBindGroup(0, this._bindings);
+        // X/Y tile vertices, Z selects a dirty instance; unchanged slots are not touched.
+        pass.dispatchWorkgroups(this.owner.groupsX, this.owner.groupsY, record);
+        this._dirty.clear();
+    }
+
+    public release (instance: WebGPUMorphComputeInstance): void {
+        this._dirty.delete(instance);
+        if (!this._dirty.size) pending.get(this.owner.device)?.delete(this);
+        this._freeSlots.push(instance.slot);
+        this.owner.release(instance);
+        if (--this._liveCount === 0) {
+            this._weights.destroy();
+            this.owner.gfxDevice.memoryStatus.bufferSize -= this.owner.weightsSize * this.owner.batchCapacity;
+            for (const output of this.outputs) output?.destroy();
+            this.owner.releaseBatch(this);
+        }
     }
 }
 
 export class WebGPUMorphComputeInstance {
-    public readonly outputs: readonly Texture[];
-    private readonly _weights: GPUBuffer;
     private readonly _values: Float32Array;
-    private readonly _bindings: GPUBindGroup;
     private _destroyed = false;
 
-    constructor (private readonly _owner: WebGPUMorphCompute) {
-        const device = _owner.device;
-        this.outputs = [0, 1, 2].map(() => _owner.gfxDevice.createTexture(new TextureInfo(
-            TextureType.TEX2D,
-            TextureUsageBit.STORAGE | TextureUsageBit.SAMPLED,
-            Format.RGBA32F,
-            _owner.outputWidth,
-            _owner.outputHeight,
-        )));
-        this._weights = device.createBuffer({ size: Math.max(4, _owner.targetCount * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-        this._values = new Float32Array(_owner.targetCount);
-        this._bindings = device.createBindGroup({ layout: _owner.pipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: _owner.texture.createView({ dimension: '2d-array' }) },
-                { binding: 1, resource: { buffer: this._weights } },
-                { binding: 2, resource: (this.outputs[0] as WebGPUTexture).gpuTexture.gpuTexture!.createView() },
-                { binding: 3, resource: { buffer: _owner.info } },
-                { binding: 4, resource: (this.outputs[1] as WebGPUTexture).gpuTexture.gpuTexture!.createView() },
-                { binding: 5, resource: (this.outputs[2] as WebGPUTexture).gpuTexture.gpuTexture!.createView() },
-            ] });
-        this._markDirty();
+    constructor (private readonly _batch: WebGPUMorphComputeBatch, public readonly slot: number) {
+        this._values = new Float32Array(_batch.owner.targetCount);
     }
+
+    public get outputs (): readonly (Texture | null)[] { return this._batch.outputs; }
+    public get outputWidth (): number { return this._batch.owner.outputWidth; }
+    public get outputHeight (): number { return this._batch.owner.outputHeight * this._batch.owner.batchCapacity; }
+    public get outputRowOffset (): number { return this.slot * this._batch.owner.outputHeight; }
 
     public setWeights (weights: readonly number[]): void {
         if (this._destroyed) throw new Error('Morph compute instance has been destroyed.');
@@ -207,32 +342,32 @@ export class WebGPUMorphComputeInstance {
                 changed = true;
             }
         }
-        if (changed) this._markDirty();
+        if (changed) this._batch.markDirty(this);
     }
 
-    public dispatch (pass: GPUComputePassEncoder): void {
-        const owner = this._owner;
-        if (this._values.length) owner.device.queue.writeBuffer(this._weights, 0, this._values);
-        pass.setPipeline(owner.pipeline);
-        pass.setBindGroup(0, this._bindings);
-        pass.dispatchWorkgroups(owner.groupsX, owner.groupsY);
+    public pack (words: Uint32Array, floats: Float32Array, offset: number): void {
+        let activeCount = 0;
+        for (const weight of this._values) if (weight !== 0) ++activeCount;
+        const sparse = activeCount * 2 < this._values.length;
+        words[offset++] = this.slot;
+        words[offset++] = sparse ? activeCount : this._values.length;
+        words[offset++] = sparse ? 1 : 0;
+        if (sparse) {
+            // Keep target order to preserve the original accumulation order.
+            for (let target = 0; target < this._values.length; ++target) {
+                const weight = this._values[target];
+                if (weight === 0) continue;
+                words[offset++] = target;
+                floats[offset++] = weight;
+            }
+        } else {
+            floats.set(this._values, offset);
+        }
     }
 
     public destroy (): void {
         if (this._destroyed) return;
         this._destroyed = true;
-        pending.get(this._owner.device)?.delete(this);
-        this._owner.release(this);
-        this._weights.destroy();
-        for (const output of this.outputs) output.destroy();
-    }
-
-    private _markDirty (): void {
-        let instances = pending.get(this._owner.device);
-        if (!instances) {
-            instances = new Set();
-            pending.set(this._owner.device, instances);
-        }
-        instances.add(this);
+        this._batch.release(this);
     }
 }

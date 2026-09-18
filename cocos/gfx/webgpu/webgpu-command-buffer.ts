@@ -321,8 +321,8 @@ export class WebGPUCommandBuffer extends CommandBuffer {
     public endRenderPass (): void {
         const device = WebGPUDeviceManager.instance;
         const nativeDevice = (device).nativeDevice!;
-        this._numDispatches += flushWebGPUMorphComputes(nativeDevice);
         const cmdEncoder = nativeDevice.createCommandEncoder();
+        this._numDispatches += flushWebGPUMorphComputes(nativeDevice, cmdEncoder);
         const passEncoder = cmdEncoder.beginRenderPass(this._nativePassDesc!);
         this._renderPassFuncQueue.forEach((cb) => {
             cb(passEncoder);
