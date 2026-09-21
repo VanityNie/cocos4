@@ -22,6 +22,7 @@
  THE SOFTWARE.
 */
 
+import { WECHAT } from 'internal:constants';
 import { DescriptorSet } from '../base/descriptor-set';
 import { Buffer } from '../base/buffer';
 import { CommandBuffer } from '../base/command-buffer';
@@ -586,7 +587,10 @@ export class WebGPUDevice extends Device {
         this._caps.maxTextureSize = limits.maxTextureDimension2D;
         this._caps.maxArrayTextureLayers = limits.maxTextureArrayLayers;
         this._caps.max3DTextureSize = limits.maxTextureDimension3D;
-        this._caps.uboOffsetAlignment  = limits.minUniformBufferOffsetAlignment;
+        // 微信桥接报告的限制可能小于 GPU 验证所使用的 256 字节地址间隔。
+        this._caps.uboOffsetAlignment = WECHAT
+            ? Math.max(256, device.limits.minUniformBufferOffsetAlignment)
+            : device.limits.minUniformBufferOffsetAlignment;
 
         // Compute limits are read from the device (not the adapter): no elevated
         // compute limits are requested, so these are the values validation enforces.

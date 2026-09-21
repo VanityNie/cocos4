@@ -244,7 +244,7 @@ export class WebGPUDescriptorSet extends DescriptorSet {
         const layout = this._layout as WebGPUDescriptorSetLayout;
         const bindGroup = nativeDevice?.createBindGroup({
             layout: layout.gpuDescriptorSetLayout!.bindGroupLayout!,
-            entries: this._bindGroupEntries.values(),
+            entries: Array.from(this._bindGroupEntries.values()),
         });
         this._gpuDescriptorSet!.bindGroupLayout = layout.gpuDescriptorSetLayout!.bindGroupLayout!;
         this._gpuDescriptorSet!.bindGroup = bindGroup!;

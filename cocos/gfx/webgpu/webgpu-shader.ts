@@ -38,7 +38,8 @@ export class WebGPUShader extends Shader {
     public initialize (info: Readonly<ShaderInfo>): void {
         this._name = info.name;
         this._stages = info.stages;
-        this._attributes = info.attributes;
+        // WebGPU 使用 builtin(vertex_index)，无需内置 a_vertexId 顶点输入。
+        this._attributes = info.attributes.filter((attribute) => attribute.name !== 'a_vertexId');
         this._blocks = info.blocks;
         this._samplers = info.samplers;
         const stageSize = info.stages.length;
