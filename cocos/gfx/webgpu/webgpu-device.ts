@@ -584,7 +584,10 @@ export class WebGPUDevice extends Device {
         this._caps.maxUniformBufferBindings = 12;
         this._caps.maxVertexAttributes = limits.maxVertexAttributes;
         this._caps.maxUniformBufferBindings = limits.maxUniformBufferBindingSize;
-        this._caps.maxTextureSize = limits.maxTextureDimension2D;
+        // 当前微信桥接报告 16384，真机二维纹理验证上限为 8192。
+        this._caps.maxTextureSize = WECHAT
+            ? Math.min(8192, device.limits.maxTextureDimension2D)
+            : device.limits.maxTextureDimension2D;
         this._caps.maxArrayTextureLayers = limits.maxTextureArrayLayers;
         this._caps.max3DTextureSize = limits.maxTextureDimension3D;
         // 微信桥接报告的限制可能小于 GPU 验证所使用的 256 字节地址间隔。

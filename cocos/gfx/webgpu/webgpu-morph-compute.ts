@@ -109,6 +109,7 @@ export class WebGPUMorphCompute {
         this.device = (gfxDevice as WebGPUDevice).nativeDevice!;
         const device = this.device;
         const limits = device.limits;
+        const maxTextureSize = Math.min(gfxDevice.capabilities.maxTextureSize, limits.maxTextureDimension2D);
         this.attributes = [0, 1, 2].filter((attribute) => layers[attribute] !== null && layers[attribute] !== undefined);
         if (!this.attributes.length) throw new Error('Compute morph requires at least one displacement attribute.');
         const attributeMask = this.attributes.reduce((mask, attribute) => mask | (1 << attribute), 0);
@@ -117,12 +118,12 @@ export class WebGPUMorphCompute {
         // Sparse encoding is selected only when 2K < T, so it never enlarges the payload.
         this.weightsSize = Math.max(16, 12 + targetCount * 4);
         const pixels = Math.max(1, vertexCount * targetCount);
-        const width = Math.min(pixels, limits.maxTextureDimension2D);
+        const width = Math.min(pixels, maxTextureSize);
         const height = Math.ceil(pixels / width);
-        this.outputWidth = Math.min(Math.max(1, vertexCount), limits.maxTextureDimension2D);
+        this.outputWidth = Math.min(Math.max(1, vertexCount), maxTextureSize);
         this.outputHeight = Math.max(1, Math.ceil(vertexCount / this.outputWidth));
-        if (height > limits.maxTextureDimension2D
-            || this.outputHeight > limits.maxTextureDimension2D
+        if (height > maxTextureSize
+            || this.outputHeight > maxTextureSize
             || this.weightsSize > limits.maxStorageBufferBindingSize
             || this.weightsSize > limits.maxBufferSize) {
             throw new Error('Morph data exceeds the WebGPU device texture or storage buffer limits.');
@@ -136,7 +137,7 @@ export class WebGPUMorphCompute {
         this.batchCapacity = Math.min(
             maxBatchSize,
             limits.maxComputeWorkgroupsPerDimension,
-            Math.floor(limits.maxTextureDimension2D / this.outputHeight),
+            Math.floor(maxTextureSize / this.outputHeight),
             Math.floor(Math.min(limits.maxStorageBufferBindingSize, limits.maxBufferSize) / this.weightsSize),
             Math.max(1, Math.floor(8 * 1024 * 1024 / instanceOutputBytes)),
         );
