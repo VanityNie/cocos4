@@ -395,12 +395,15 @@ export class MeshBuffer {
         }
         const byteCount = this.byteOffset;
         const indexCount = this.indexOffset;
+        const indexBytes = indexCount * 2;
+        let allUploaded = true;
         for (let i = 0; i < submitCount; ++i) {
             const iaRef = this._iaPool[i];
 
             let verticesData = new Float32Array(this.vData.buffer, 0, byteCount >> 2);
             const indicesData = new Uint16Array(this.iData.buffer, 0, indexCount);
 
+            let requiredVertexBytes = byteCount;
             const vertexBuffer = iaRef.vertexBuffers[0];
             if (byteCount > vertexBuffer.size) {
                 vertexBuffer.resize(byteCount);
@@ -413,6 +416,7 @@ export class MeshBuffer {
                     }
                     const actualByteCount = (maxVertex + 1) * this._vertexFormatBytes;
                     if (actualByteCount < byteCount) {
+                        requiredVertexBytes = actualByteCount;
                         if (actualByteCount > vertexBuffer.size) {
                             vertexBuffer.resize(actualByteCount);
                         }
@@ -420,14 +424,30 @@ export class MeshBuffer {
                     }
                 }
             }
-            vertexBuffer.update(verticesData);
 
-            if (indexCount * 2 > iaRef.indexBuffer.size) {
-                iaRef.indexBuffer.resize(indexCount * 2);
+            const indexBuffer = iaRef.indexBuffer;
+            if (indexBytes > indexBuffer.size) {
+                indexBuffer.resize(indexBytes);
             }
-            iaRef.indexBuffer.update(indicesData);
+
+            if (vertexBuffer.size < requiredVertexBytes || indexBuffer.size < indexBytes) {
+                allUploaded = false;
+                if (iOS14) {
+                    iaRef.ia.indexCount = 0;
+                } else {
+                    for (let k = 0; k < this._nextFreeIAHandle; ++k) {
+                        this._iaPool[k].ia.indexCount = 0;
+                    }
+                }
+                continue;
+            }
+
+            vertexBuffer.update(verticesData);
+            indexBuffer.update(indicesData);
         }
-        this.dirty = false;
+        if (allUploaded) {
+            this.dirty = false;
+        }
     }
 
     private createNewIA (device: Device): IIARef {
