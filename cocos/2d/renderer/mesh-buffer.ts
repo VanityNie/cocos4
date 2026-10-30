@@ -398,12 +398,27 @@ export class MeshBuffer {
         for (let i = 0; i < submitCount; ++i) {
             const iaRef = this._iaPool[i];
 
-            const verticesData = new Float32Array(this.vData.buffer, 0, byteCount >> 2);
+            let verticesData = new Float32Array(this.vData.buffer, 0, byteCount >> 2);
             const indicesData = new Uint16Array(this.iData.buffer, 0, indexCount);
 
             const vertexBuffer = iaRef.vertexBuffers[0];
             if (byteCount > vertexBuffer.size) {
                 vertexBuffer.resize(byteCount);
+                if (byteCount > vertexBuffer.size && indexCount > 0) {
+                    let maxVertex = 0;
+                    for (let j = 0; j < indexCount; ++j) {
+                        if (indicesData[j] > maxVertex) {
+                            maxVertex = indicesData[j];
+                        }
+                    }
+                    const actualByteCount = (maxVertex + 1) * this._vertexFormatBytes;
+                    if (actualByteCount < byteCount) {
+                        if (actualByteCount > vertexBuffer.size) {
+                            vertexBuffer.resize(actualByteCount);
+                        }
+                        verticesData = new Float32Array(this.vData.buffer, 0, actualByteCount >> 2);
+                    }
+                }
             }
             vertexBuffer.update(verticesData);
 

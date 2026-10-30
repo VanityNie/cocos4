@@ -33,7 +33,7 @@ import {
 } from './webgl-commands';
 import { IWebGLGPUBuffer, IWebGLGPUBufferView, WebGLIndirectDrawInfos } from './webgl-gpu-objects';
 import { WebGLDeviceManager } from './webgl-define';
-import { warnID } from '../../core/platform/debug';
+import { warn, warnID } from '../../core/platform/debug';
 
 /** @mangle */
 export class WebGLBuffer extends Buffer {
@@ -48,6 +48,7 @@ export class WebGLBuffer extends Buffer {
     private _gpuBuffer: IWebGLGPUBuffer | null = null;
     private _gpuBufferView: IWebGLGPUBufferView | null = null;
     private _uniformBuffer: Uint8Array | null = null;
+    private _lastFailedSize = 0;
 
     constructor () {
         super();
@@ -142,6 +143,14 @@ export class WebGLBuffer extends Buffer {
             this._count = this._size / this._stride;
             WebGLDeviceManager.instance.memoryStatus.bufferSize -= oldSize;
             WebGLDeviceManager.instance.memoryStatus.bufferSize += this._size;
+            if (this._size !== size) {
+                if (this._lastFailedSize !== size) {
+                    this._lastFailedSize = size;
+                    warn(`WebGLBuffer[${this.objectID}] (usage: ${this._usage}) resize failed to reach requested size: requested ${size} bytes, actual ${this._size} bytes.`);
+                }
+            } else {
+                this._lastFailedSize = 0;
+            }
         }
     }
 
