@@ -114,16 +114,15 @@ export class WebGL2Buffer extends Buffer {
         const oldSize = this._size;
         if (oldSize === size) { return; }
 
-        this._size = size;
-        this._count = this._size / this._stride;
-
         if (this._gpuBuffer) {
             this._gpuBuffer.size = size;
             if (size > 0) {
                 WebGL2CmdFuncResizeBuffer(WebGL2DeviceManager.instance, this._gpuBuffer);
-                WebGL2DeviceManager.instance.memoryStatus.bufferSize -= oldSize;
-                WebGL2DeviceManager.instance.memoryStatus.bufferSize += size;
             }
+            this._size = this._gpuBuffer.size;
+            this._count = this._size / this._stride;
+            WebGL2DeviceManager.instance.memoryStatus.bufferSize -= oldSize;
+            WebGL2DeviceManager.instance.memoryStatus.bufferSize += this._size;
         }
     }
 
@@ -141,6 +140,8 @@ export class WebGL2Buffer extends Buffer {
         } else {
             buffSize = (buffer as ArrayBuffer).byteLength;
         }
+
+        if (buffSize > this._size) { return; }
 
         WebGL2CmdFuncUpdateBuffer(
             WebGL2DeviceManager.instance,
