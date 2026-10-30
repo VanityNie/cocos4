@@ -141,8 +141,6 @@ export class WebGL2Buffer extends Buffer {
             buffSize = (buffer as ArrayBuffer).byteLength;
         }
 
-        if (buffSize > this._size) { return; }
-
         WebGL2CmdFuncUpdateBuffer(
             WebGL2DeviceManager.instance,
             this._gpuBuffer!,

@@ -830,6 +830,7 @@ export function WebGL2CmdFuncUpdateBuffer (
             gpuBuffer.indirects.setDrawInfo(offset + i, drawInfos[i]);
         }
     } else {
+        if (size > gpuBuffer.size) { return; }
         const buff = buffer as ArrayBuffer;
         const { gl } = device;
         const cache = device.getStateCache();
