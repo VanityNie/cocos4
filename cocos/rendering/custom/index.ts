@@ -25,16 +25,17 @@
 import zlib from '../../../external/compression/zlib.min';
 import { BasicPipeline, PipelineBuilder } from './pipeline';
 import { WebPipeline } from './web-pipeline';
+import { WebGPUPipeline } from './webgpu-pipeline';
 import { macro } from '../../core/platform/macro';
 import { LayoutGraphData, loadLayoutGraphData } from './layout-graph';
 import { BinaryInputArchive } from './binary-archive';
 import { WebProgramLibrary } from './web-program-library';
-import { Device } from '../../gfx';
+import { API, Device, deviceManager } from '../../gfx';
 import { initializeLayoutGraphData, terminateLayoutGraphData, getCustomPassID, getCustomPhaseID, getCustomSubpassID } from './layout-graph-utils';
 import { ProgramLibrary } from './private';
 import { forceResizeAllWindows } from './framework';
 
-let _pipeline: WebPipeline | null = null;
+let _pipeline: BasicPipeline | null = null;
 
 export const INVALID_ID = 0xFFFFFFFF;
 const defaultLayoutGraph = new LayoutGraphData();
@@ -52,7 +53,9 @@ export const programLib: ProgramLibrary = new WebProgramLibrary(defaultLayoutGra
 export function createCustomPipeline (): BasicPipeline {
     const layoutGraph = defaultLayoutGraph;
 
-    const ppl = new WebPipeline(layoutGraph);
+    const ppl = deviceManager.gfxDevice.gfxAPI === API.WEBGPU
+        ? new WebGPUPipeline(layoutGraph)
+        : new WebPipeline(layoutGraph);
     const pplName = macro.CUSTOM_PIPELINE_NAME;
     ppl.setCustomPipelineName(pplName);
     (programLib as WebProgramLibrary).pipeline = ppl;
