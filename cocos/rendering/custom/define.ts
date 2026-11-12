@@ -897,15 +897,15 @@ export function processPassMG (pass: RasterPass): void {
     currRPInfo.init(currCHash);
     const poLen = passOrders.length;
     if (poLen !== 0) {
-        let isLoadOP = false;
-        for (const [_, raster] of pass.rasterViews) {
-            if (raster.loadOp === LoadOp.LOAD) {
-                isLoadOP = true;
+        let allAttachmentsLoad = pass.rasterViews.size > 0;
+        for (const raster of pass.rasterViews.values()) {
+            if (raster.loadOp !== LoadOp.LOAD) {
+                allAttachmentsLoad = false;
                 break;
             }
         }
         const prevPass = passOrders[poLen - 1];
-        if (isLoadOP &&  rpCombineMap.get(prevPass) === currCHash) {
+        if (allAttachmentsLoad && rpCombineMap.get(prevPass) === currCHash) {
             const prevInfo = rpMergeInfos.get(prevPass)!;
             prevInfo.needEndRP = false;
             currRPInfo.needBeginRP = false;
