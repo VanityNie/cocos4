@@ -24,7 +24,7 @@
 
 import { DEBUG } from 'internal:constants';
 import { LoadOp, StoreOp } from '../../gfx';
-import type { ComputePass, ComputeView, CopyPass, RasterPass, RenderGraph, ResourceGraph } from './render-graph';
+import type { ComputePass, ComputeView, CopyPass, RasterPass, RasterView, RenderGraph, ResourceGraph } from './render-graph';
 import { RenderGraphValue } from './render-graph';
 import { AccessType, ResourceResidency } from './types';
 
@@ -53,9 +53,12 @@ function canMergeRasterPasses (prev: RasterPass, curr: RasterPass): boolean {
     for (const sub of prev.subpassGraph._subpasses) {
         if (sub.resolvePairs.length) return false;
     }
+    for (const sub of curr.subpassGraph._subpasses) {
+        if (sub.resolvePairs.length) return false;
+    }
     const it = prev.rasterViews.entries();
     for (const [name, cv] of curr.rasterViews) {
-        const [pn, pv] = it.next().value!;
+        const [pn, pv] = it.next().value as [string, RasterView];
         if (pn !== name || cv.attachmentType !== pv.attachmentType
             || cv.loadOp !== LoadOp.LOAD || pv.storeOp !== StoreOp.STORE || cv.storeOp !== StoreOp.STORE) {
             return false;
