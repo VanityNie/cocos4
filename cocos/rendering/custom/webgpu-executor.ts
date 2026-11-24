@@ -277,3 +277,6 @@ export class WebGPUGraphCompilerPlan {
         this.resLastUse[id] = step;
     }
 }
+
+export { WebGPUDeviceResourceTable, WebGPURenderPassEntry } from './webgpu-resource-table';
+export type { WebGPUDeviceResourceStats } from './webgpu-resource-table';
