@@ -57,20 +57,6 @@ export interface WebGPUPassBindResult {
     dynamicOffsetCount: number;
 }
 
-export interface WebGPUPassBindingStats {
-    bindGroupsCreated: number;
-    bindGroupHits: number;
-    externalImmediateBuilds: number;
-    staticSlotsCreated: number;
-    staticBlockUploads: number;
-    staticBlockSkips: number;
-    dynamicBlockAllocations: number;
-    uboBytesUploaded: number;
-    ringChunkCount: number;
-    evictions: number;
-    cachedBindGroups: number;
-}
-
 const enum WebGPUBindingKind {
     TEXTURE = 0,
     SAMPLER = 1,
@@ -116,6 +102,7 @@ interface ResourceBindingDesc {
 interface DynamicOffsetEntry {
     readonly binding: number;
     readonly uboSlotIndex: number; // >= 0 for dynamic UBO, -1 for dynamic storage buffer (offset 0)
+    readonly blockIndex: number;   // >= 0 for dynamic UBO in schema.uboBlocks, -1 for dynamic storage buffer
 }
 
 interface PassLayoutSchema {
@@ -123,6 +110,7 @@ interface PassLayoutSchema {
     readonly bgl: GPUBindGroupLayout;
     readonly bglUID: number;
     readonly uboBlocks: UniformBlockSchema[];
+    readonly uboByID: Map<number, number>;
     readonly staticUboCount: number;
     readonly dynamicUboCount: number;
     readonly dynamicEntries: DynamicOffsetEntry[];
@@ -318,7 +306,6 @@ function getResourceBindingKind (type: DescriptorTypeOrder): WebGPUBindingKind {
 
 class WebGPUUniformRing {
     public totalUsedBytes = 0;
-    public expansions = 0;
 
     private readonly _align: number;
     private readonly _maxChunkBytes: number;
@@ -331,10 +318,6 @@ class WebGPUUniformRing {
     ) {
         this._align = Math.max(16, this._host.device.limits.minUniformBufferOffsetAlignment || 256);
         this._maxChunkBytes = this._host.device.limits.maxBufferSize || 268435456;
-    }
-
-    public get chunkCount (): number {
-        return this._chunks.length;
     }
 
     public beginFrame (): void {
@@ -364,7 +347,6 @@ class WebGPUUniformRing {
             const target = Math.min(this._maxChunkBytes, nextPow2(totalStride));
             chunks.push(this._createChunk(Math.max(doubled, target, totalStride)));
             this._activeChunkIdx = chunks.length - 1;
-            ++this.expansions;
         }
 
         const chunk = chunks[this._activeChunkIdx];
@@ -381,20 +363,16 @@ class WebGPUUniformRing {
         return chunk;
     }
 
-    public flush (): number {
-        let uploaded = 0;
+    public flush (): void {
         for (const chunk of this._chunks) {
             if (!chunk.usedBytes) continue;
             this._host.device.queue.writeBuffer(chunk.gpuBuffer, 0, chunk.stagingBytes, 0, chunk.usedBytes);
-            uploaded += chunk.usedBytes;
         }
-        return uploaded;
     }
 
     public endFrameReconcile (onChunkEvict: (bufferUID: number) => void): void {
-        if (this._chunks.length <= 1) return;
-        const capacity = Math.max(this._initialCapacity, nextPow2(this.totalUsedBytes));
-        if (capacity > this._maxChunkBytes) return;
+        if (this._chunks.length <= 1 || this.totalUsedBytes > this._maxChunkBytes) return;
+        const capacity = Math.min(this._maxChunkBytes, Math.max(this._initialCapacity, nextPow2(this.totalUsedBytes)));
         for (const chunk of this._chunks) {
             onChunkEvict(chunk.bufferUID);
             chunk.gpuBuffer.destroy();
@@ -425,7 +403,6 @@ class WebGPUUniformRing {
         this._chunks.length = 0;
         this._activeChunkIdx = 0;
         this.totalUsedBytes = 0;
-        this.expansions = 0;
     }
 
     private _createChunk (capacity: number): UniformRingChunk {
@@ -448,20 +425,6 @@ class WebGPUUniformRing {
 }
 
 export class WebGPUPassBindingTable {
-    public readonly stats: WebGPUPassBindingStats = {
-        bindGroupsCreated: 0,
-        bindGroupHits: 0,
-        externalImmediateBuilds: 0,
-        staticSlotsCreated: 0,
-        staticBlockUploads: 0,
-        staticBlockSkips: 0,
-        dynamicBlockAllocations: 0,
-        uboBytesUploaded: 0,
-        ringChunkCount: 0,
-        evictions: 0,
-        cachedBindGroups: 0,
-    };
-
     private _serial = 0;
     private readonly _schemas = new Map<number, PassLayoutSchema | null>();
     private readonly _staticSlots = new Map<number, Map<string, StaticUniformSlot>>();
@@ -477,6 +440,8 @@ export class WebGPUPassBindingTable {
     private readonly _entriesScratch: GPUBindGroupEntry[] = [];
     private readonly _boundUIDsScratch: number[] = [];
     private readonly _explicitSamplers = new Set<number>();
+    private readonly _resolvedUboBufs: (GPUBuffer | null)[] = [];
+    private readonly _resolvedRawTexs: (object | null)[] = [];
     private readonly _resolvedTexViews: (GPUTextureView | null)[] = [];
     private readonly _resolvedBufs: (GPUBuffer | null)[] = [];
     private readonly _resolvedSamplers: (GPUSampler | null)[] = [];
@@ -502,15 +467,6 @@ export class WebGPUPassBindingTable {
 
     public beginFrame (serial: number): void {
         this._serial = serial;
-        this.stats.bindGroupsCreated = 0;
-        this.stats.bindGroupHits = 0;
-        this.stats.externalImmediateBuilds = 0;
-        this.stats.staticSlotsCreated = 0;
-        this.stats.staticBlockUploads = 0;
-        this.stats.staticBlockSkips = 0;
-        this.stats.dynamicBlockAllocations = 0;
-        this.stats.uboBytesUploaded = 0;
-        this.stats.evictions = 0;
         this._dynamicOffsetCursor = 0;
         this._ring.beginFrame();
     }
@@ -531,11 +487,11 @@ export class WebGPUPassBindingTable {
         const staticSlot = schema.staticUboCount ? this._getOrCreateStaticSlot(schema.schemaKey, ownerKey, schema) : null;
         const ringChunk = dynUboCount ? this._ring.allocDynamicBlocks(schema.uboBlocks, this._dynBlockOffsets, this._serial) : null;
         this._writeUniforms(schema, staticSlot, ringChunk, dataChain);
+        this._resolveResources(schema, dataChain, computeViews);
 
         const dynTotalCount = schema.dynamicEntries.length;
         const dynStart = dynTotalCount ? this._dynamicOffsetCursor : 0;
         if (dynTotalCount) {
-            this.stats.dynamicBlockAllocations += dynUboCount;
             const end = dynStart + dynTotalCount;
             if (end > this._dynamicOffsets.length) {
                 const offsets = new Uint32Array(Math.max(end, this._dynamicOffsets.length * 2));
@@ -543,19 +499,22 @@ export class WebGPUPassBindingTable {
                 this._dynamicOffsets = offsets;
             }
             for (let i = 0; i < dynTotalCount; ++i) {
-                const { uboSlotIndex } = schema.dynamicEntries[i];
-                this._dynamicOffsets[dynStart + i] = uboSlotIndex >= 0 ? this._dynBlockOffsets[uboSlotIndex] : 0;
+                const { uboSlotIndex, blockIndex } = schema.dynamicEntries[i];
+                this._dynamicOffsets[dynStart + i] = (uboSlotIndex >= 0 && !this._resolvedUboBufs[blockIndex])
+                    ? this._dynBlockOffsets[uboSlotIndex]
+                    : 0;
             }
             this._dynamicOffsetCursor = end;
         }
 
-        this._resolveResources(schema, dataChain, computeViews);
         const hasExternalTexture = this._writeSignature(schema, staticSlot, ringChunk);
         this._bindResult.bindGroup = this._getOrCreateBindGroup(schema, staticSlot, ringChunk, hasExternalTexture);
         this._bindResult.dynamicOffsets = dynTotalCount ? this._dynamicOffsets : EMPTY_DYNAMIC_OFFSETS;
         this._bindResult.dynamicOffsetStart = dynStart;
         this._bindResult.dynamicOffsetCount = dynTotalCount;
 
+        this._resolvedUboBufs.fill(null);
+        this._resolvedRawTexs.fill(null);
         this._resolvedTexViews.fill(null);
         this._resolvedBufs.fill(null);
         this._resolvedSamplers.fill(null);
@@ -569,12 +528,9 @@ export class WebGPUPassBindingTable {
             this._host.device.queue.writeBuffer(block.gpuBuffer, 0, cpuBuffer, 0, byteSize);
             block.dirty = false;
             block.queued = false;
-            ++this.stats.staticBlockUploads;
-            this.stats.uboBytesUploaded += byteSize;
         }
         this._dirtyStaticBlocks.length = 0;
-        this.stats.uboBytesUploaded += this._ring.flush();
-        this.stats.ringChunkCount = this._ring.chunkCount;
+        this._ring.flush();
     }
 
     public onResourceEvict (uid: number): void {
@@ -582,15 +538,13 @@ export class WebGPUPassBindingTable {
     }
 
     public endFrameSweep (maxIdleFrames = DEFAULT_PASS_BINDING_IDLE_FRAMES): void {
-        this._sweepUnused((lastSerial): boolean => this._serial - lastSerial > maxIdleFrames);
+        this._sweepUnused(this._serial - maxIdleFrames);
         this._ring.endFrameReconcile((uid): void => this.onResourceEvict(uid));
-        this.stats.ringChunkCount = this._ring.chunkCount;
     }
 
     public flushUnused (): void {
-        this._sweepUnused((lastSerial): boolean => lastSerial < this._serial);
+        this._sweepUnused(this._serial);
         this._ring.trimUnused(this._serial, (uid): void => this.onResourceEvict(uid));
-        this.stats.ringChunkCount = this._ring.chunkCount;
     }
 
     public release (): void {
@@ -607,6 +561,8 @@ export class WebGPUPassBindingTable {
         this._entriesScratch.length = 0;
         this._boundUIDsScratch.length = 0;
         this._explicitSamplers.clear();
+        this._resolvedUboBufs.length = 0;
+        this._resolvedRawTexs.length = 0;
         this._resolvedTexViews.length = 0;
         this._resolvedBufs.length = 0;
         this._resolvedSamplers.length = 0;
@@ -616,17 +572,6 @@ export class WebGPUPassBindingTable {
         this._bindResult.dynamicOffsetStart = 0;
         this._bindResult.dynamicOffsetCount = 0;
         this._dynamicOffsetCursor = 0;
-        this.stats.bindGroupsCreated = 0;
-        this.stats.bindGroupHits = 0;
-        this.stats.externalImmediateBuilds = 0;
-        this.stats.staticSlotsCreated = 0;
-        this.stats.staticBlockUploads = 0;
-        this.stats.staticBlockSkips = 0;
-        this.stats.dynamicBlockAllocations = 0;
-        this.stats.uboBytesUploaded = 0;
-        this.stats.ringChunkCount = 0;
-        this.stats.evictions = 0;
-        this.stats.cachedBindGroups = 0;
     }
 
     private _getOrCompileSchema (layoutID: number, frequency: UpdateFrequency): PassLayoutSchema | null {
@@ -679,14 +624,16 @@ export class WebGPUPassBindingTable {
         }
 
         uboBlocks.sort((a, b): number => a.binding - b.binding);
+        const uboByID = new Map<number, number>();
         const constants = new Map<number, ConstantFieldLoc>();
         const dynamicEntries: DynamicOffsetEntry[] = [];
         let staticUboCount = 0;
         let dynamicUboCount = 0;
         for (let blockIndex = 0; blockIndex < uboBlocks.length; ++blockIndex) {
             const block = uboBlocks[blockIndex];
+            uboByID.set(block.descriptorID, blockIndex);
             block.slotIndex = block.isDynamic ? dynamicUboCount++ : staticUboCount++;
-            if (block.isDynamic) dynamicEntries.push({ binding: block.binding, uboSlotIndex: block.slotIndex });
+            if (block.isDynamic) dynamicEntries.push({ binding: block.binding, uboSlotIndex: block.slotIndex, blockIndex });
             const uniform = uniformBlocks.get(block.descriptorID);
             if (!uniform) continue;
             let floatOffset = 0;
@@ -711,12 +658,12 @@ export class WebGPUPassBindingTable {
 
         resources.sort((a, b): number => a.binding - b.binding);
         const resourceByID = new Map<number, ResourceBindingDesc>();
-        let slotSigLen = 3 + staticUboCount;
+        let slotSigLen = 2 + uboBlocks.length;
         for (let i = 0; i < resources.length; ++i) {
             const resource = resources[i];
             resource.index = i;
             resourceByID.set(resource.descriptorID, resource);
-            if (resource.isDynamic) dynamicEntries.push({ binding: resource.binding, uboSlotIndex: -1 });
+            if (resource.isDynamic) dynamicEntries.push({ binding: resource.binding, uboSlotIndex: -1, blockIndex: -1 });
             slotSigLen += resource.kind === WebGPUBindingKind.SAMPLER_TEXTURE ? 2 : 1;
         }
         dynamicEntries.sort((a, b): number => a.binding - b.binding);
@@ -725,6 +672,7 @@ export class WebGPUPassBindingTable {
             bgl,
             bglUID: this._host.uidOf(bgl),
             uboBlocks,
+            uboByID,
             staticUboCount,
             dynamicUboCount,
             dynamicEntries,
@@ -763,7 +711,6 @@ export class WebGPUPassBindingTable {
             }
             slot = { blocks, lastSerial: this._serial };
             slots.set(ownerKey, slot);
-            ++this.stats.staticSlotsCreated;
         }
         slot.lastSerial = this._serial;
         return slot;
@@ -832,9 +779,7 @@ export class WebGPUPassBindingTable {
 
         if (!staticSlot) return;
         for (const block of staticSlot.blocks) {
-            if (!block.dirty) {
-                ++this.stats.staticBlockSkips;
-            } else if (!block.queued) {
+            if (block.dirty && !block.queued) {
                 block.queued = true;
                 this._dirtyStaticBlocks.push(block);
             }
@@ -846,11 +791,17 @@ export class WebGPUPassBindingTable {
         dataChain: readonly (RenderData | null | undefined)[],
         computeViews: ReadonlyMap<string, readonly ComputeView[]> | null | undefined,
     ): void {
+        const uboCount = schema.uboBlocks.length;
+        this._resolvedUboBufs.length = uboCount;
+        this._resolvedUboBufs.fill(null);
+
         const resCount = schema.resources.length;
+        this._resolvedRawTexs.length = resCount;
         this._resolvedTexViews.length = resCount;
         this._resolvedBufs.length = resCount;
         this._resolvedSamplers.length = resCount;
         this._resolvedExtTexs.length = resCount;
+        this._resolvedRawTexs.fill(null);
         this._resolvedTexViews.fill(null);
         this._resolvedBufs.fill(null);
         this._resolvedSamplers.fill(null);
@@ -863,11 +814,18 @@ export class WebGPUPassBindingTable {
                 const resource = schema.resourceByID.get(id);
                 if (resource && (resource.kind === WebGPUBindingKind.TEXTURE || resource.kind === WebGPUBindingKind.SAMPLER_TEXTURE
                     || resource.kind === WebGPUBindingKind.STORAGE_TEXTURE)) {
+                    this._resolvedRawTexs[resource.index] = texture;
                     const view = this._host.unwrapTextureView(texture);
                     if (view) this._resolvedTexViews[resource.index] = view;
                 }
             }
             for (const [id, buffer] of data.buffers) {
+                const uboBlockIndex = schema.uboByID.get(id);
+                if (uboBlockIndex !== undefined) {
+                    const gpuBuffer = this._host.unwrapBuffer(buffer);
+                    if (gpuBuffer) this._resolvedUboBufs[uboBlockIndex] = gpuBuffer;
+                    continue;
+                }
                 const resource = schema.resourceByID.get(id);
                 if (resource?.kind === WebGPUBindingKind.STORAGE_BUFFER) {
                     const gpuBuffer = this._host.unwrapBuffer(buffer);
@@ -877,7 +835,7 @@ export class WebGPUPassBindingTable {
             for (const [id, sampler] of data.samplers) {
                 const resource = schema.resourceByID.get(id);
                 if (resource?.kind !== WebGPUBindingKind.SAMPLER && resource?.kind !== WebGPUBindingKind.SAMPLER_TEXTURE) continue;
-                const gpuSampler = this._host.unwrapSampler(sampler, data.textures.get(id));
+                const gpuSampler = this._host.unwrapSampler(sampler, data.textures.get(id) ?? this._resolvedRawTexs[resource.index]);
                 if (gpuSampler) {
                     this._resolvedSamplers[resource.index] = gpuSampler;
                     this._explicitSamplers.add(id);
@@ -907,6 +865,7 @@ export class WebGPUPassBindingTable {
             const external = kind === WebGPUBindingKind.STORAGE_TEXTURE ? null : this._host.getExternalTextureByName?.(name);
             if (external) {
                 this._resolvedExtTexs[index] = external;
+                this._resolvedTexViews[index] = null;
             } else {
                 const view = this._host.getTextureViewByName(name);
                 if (view) {
@@ -927,15 +886,17 @@ export class WebGPUPassBindingTable {
         boundUIDs.length = 0;
         sig[0] = schema.schemaKey;
         sig[1] = schema.bglUID;
-        sig[2] = ringChunk ? ringChunk.bufferUID : 0;
-        if (ringChunk) boundUIDs.push(ringChunk.bufferUID);
 
-        let n = 3;
-        if (staticSlot) {
-            for (const block of staticSlot.blocks) {
-                sig[n++] = block.bufferUID;
-                boundUIDs.push(block.bufferUID);
-            }
+        let n = 2;
+        const uboBlocks = schema.uboBlocks;
+        for (let blockIndex = 0; blockIndex < uboBlocks.length; ++blockIndex) {
+            const extBuf = this._resolvedUboBufs[blockIndex];
+            const block = uboBlocks[blockIndex];
+            const uid = extBuf
+                ? this._host.uidOf(extBuf)
+                : (block.isDynamic ? ringChunk!.bufferUID : staticSlot!.blocks[block.slotIndex].bufferUID);
+            sig[n++] = uid;
+            boundUIDs.push(uid);
         }
 
         let hasExternalTexture = false;
@@ -950,11 +911,15 @@ export class WebGPUPassBindingTable {
             }
             if (kind !== WebGPUBindingKind.SAMPLER) {
                 const external = this._resolvedExtTexs[index];
-                if (external) hasExternalTexture = true;
-                else this._resolvedTexViews[index] ??= this._host.getDefaultTextureView(viewDimension);
-                const uid = this._host.uidOf(external ?? this._resolvedTexViews[index]!);
-                sig[n++] = uid;
-                boundUIDs.push(uid);
+                if (external) {
+                    hasExternalTexture = true;
+                } else {
+                    const view = this._resolvedTexViews[index] ?? this._host.getDefaultTextureView(viewDimension);
+                    this._resolvedTexViews[index] = view;
+                    const uid = this._host.uidOf(view);
+                    sig[n++] = uid;
+                    boundUIDs.push(uid);
+                }
             }
             if (kind === WebGPUBindingKind.SAMPLER || kind === WebGPUBindingKind.SAMPLER_TEXTURE) {
                 const sampler = this._resolvedSamplers[index] ?? this._host.getDefaultSampler();
@@ -974,9 +939,7 @@ export class WebGPUPassBindingTable {
         hasExternalTexture: boolean,
     ): GPUBindGroup {
         if (hasExternalTexture) {
-            const bindGroup = this._createBindGroup(schema, staticSlot, ringChunk);
-            ++this.stats.externalImmediateBuilds;
-            return bindGroup;
+            return this._createBindGroup(schema, staticSlot, ringChunk);
         }
 
         const sigLen = schema.slotSigLen;
@@ -986,7 +949,6 @@ export class WebGPUPassBindingTable {
             for (const entry of bucket) {
                 if (signatureEquals(entry.sig, this._sig, sigLen)) {
                     entry.lastSerial = this._serial;
-                    ++this.stats.bindGroupHits;
                     return entry.bindGroup;
                 }
             }
@@ -1001,16 +963,17 @@ export class WebGPUPassBindingTable {
         };
         if (bucket) bucket.push(entry);
         else this._cache.set(hash, [entry]);
-        ++this.stats.bindGroupsCreated;
-        ++this.stats.cachedBindGroups;
         return bindGroup;
     }
 
     private _createBindGroup (schema: PassLayoutSchema, staticSlot: StaticUniformSlot | null, ringChunk: UniformRingChunk | null): GPUBindGroup {
         const entries = this._entriesScratch;
         entries.length = 0;
-        for (const { binding, isDynamic, slotIndex, byteSize } of schema.uboBlocks) {
-            const buffer = isDynamic ? ringChunk!.gpuBuffer : staticSlot!.blocks[slotIndex].gpuBuffer;
+        const uboBlocks = schema.uboBlocks;
+        for (let blockIndex = 0; blockIndex < uboBlocks.length; ++blockIndex) {
+            const { binding, isDynamic, slotIndex, byteSize } = uboBlocks[blockIndex];
+            const buffer = this._resolvedUboBufs[blockIndex]
+                ?? (isDynamic ? ringChunk!.gpuBuffer : staticSlot!.blocks[slotIndex].gpuBuffer);
             entries.push({ binding, resource: { buffer, offset: 0, size: byteSize } });
         }
         for (const { binding, kind, index, samplerBinding } of schema.resources) {
@@ -1030,10 +993,11 @@ export class WebGPUPassBindingTable {
         return bindGroup;
     }
 
-    private _sweepUnused (isUnused: (lastSerial: number) => boolean): void {
+    private _sweepUnused (minActiveSerial: number): void {
+        this._evictBindGroups((entry): boolean => entry.lastSerial < minActiveSerial);
         for (const [schemaKey, slots] of this._staticSlots) {
             for (const [ownerKey, slot] of slots) {
-                if (!isUnused(slot.lastSerial)) continue;
+                if (slot.lastSerial >= minActiveSerial) continue;
                 for (const block of slot.blocks) {
                     if (block.queued) {
                         const idx = this._dirtyStaticBlocks.indexOf(block);
@@ -1041,28 +1005,20 @@ export class WebGPUPassBindingTable {
                         block.queued = false;
                         block.dirty = false;
                     }
-                    this.onResourceEvict(block.bufferUID);
                     block.gpuBuffer.destroy();
                 }
                 slots.delete(ownerKey);
             }
             if (!slots.size) this._staticSlots.delete(schemaKey);
         }
-        this._evictBindGroups((entry): boolean => isUnused(entry.lastSerial));
     }
 
     private _evictBindGroups (shouldEvict: (entry: BindGroupEntry) => boolean): void {
-        let count = 0;
         for (const [hash, bucket] of this._cache) {
             for (let i = bucket.length - 1; i >= 0; --i) {
-                if (shouldEvict(bucket[i])) {
-                    bucket.splice(i, 1);
-                    ++this.stats.evictions;
-                }
+                if (shouldEvict(bucket[i])) bucket.splice(i, 1);
             }
             if (!bucket.length) this._cache.delete(hash);
-            count += bucket.length;
         }
-        this.stats.cachedBindGroups = count;
     }
 }
